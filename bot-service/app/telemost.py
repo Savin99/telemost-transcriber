@@ -126,6 +126,12 @@ class TelemostSession:
         # Проверить что мы действительно в комнате
         await self._verify_joined()
 
+        # Выключить микрофон и камеру внутри комнаты
+        await self._mute_devices_in_room()
+
+        # Замьютить микрофон Chrome через PulseAudio (надёжный способ)
+        await self._mute_chrome_mic()
+
         # Дамп для отладки
         await self._dump_html("after_join")
 
@@ -156,6 +162,75 @@ class TelemostSession:
 
         await self._screenshot("name_input_not_found")
         logger.warning("Could not find name input, proceeding without name entry")
+
+    async def _mute_chrome_mic(self):
+        """Замьютить микрофон Chrome через PulseAudio — убирает писк."""
+        import subprocess
+        try:
+            # Получить все source-outputs (микрофоны приложений)
+            result = subprocess.run(
+                ["pactl", "list", "source-outputs", "short"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().split("\n"):
+                if line.strip():
+                    idx = line.split()[0]
+                    subprocess.run(
+                        ["pactl", "set-source-output-mute", idx, "1"],
+                        check=False, timeout=5,
+                    )
+            logger.info("Muted Chrome microphone via PulseAudio")
+        except Exception as e:
+            logger.warning("Failed to mute Chrome mic via PulseAudio: %s", e)
+
+    async def _mute_devices_in_room(self):
+        """Выключить камеру и микрофон внутри комнаты встречи."""
+        mute_selectors = [
+            '[data-testid="mic-button"]',
+            'button[aria-label*="микрофон"]',
+            'button[aria-label*="Микрофон"]',
+            'button[aria-label*="Microphone"]',
+            '[data-testid="camera-button"]',
+            'button[aria-label*="камер"]',
+            'button[aria-label*="Камер"]',
+            'button[aria-label*="Camera"]',
+        ]
+        for selector in mute_selectors:
+            try:
+                btn = await self._page.query_selector(selector)
+                if btn:
+                    # Проверяем, включено ли устройство (aria-pressed="true" или нет атрибута)
+                    aria_pressed = await btn.get_attribute("aria-pressed")
+                    is_muted = await btn.get_attribute("data-muted")
+                    if aria_pressed != "false" and is_muted != "true":
+                        await btn.click()
+                        logger.info("Muted device (in-room): %s", selector)
+                        await asyncio.sleep(0.5)
+            except Exception:
+                continue
+
+        # Дополнительно: попробовать через JS отключить все MediaStream треки
+        try:
+            await self._page.evaluate("""
+                () => {
+                    // Отключить все аудио-треки (микрофон)
+                    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+                        const streams = document.querySelectorAll('video, audio');
+                        streams.forEach(el => {
+                            if (el.srcObject) {
+                                el.srcObject.getAudioTracks().forEach(track => {
+                                    if (track.kind === 'audio' && track.readyState === 'live') {
+                                        track.enabled = false;
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
+            """)
+            logger.info("Disabled audio tracks via JS")
+        except Exception as e:
+            logger.debug("JS audio track disable failed: %s", e)
 
     async def _mute_devices_prejoin(self):
         """Отключить камеру и микрофон на pre-join экране."""
