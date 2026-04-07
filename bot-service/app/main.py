@@ -65,9 +65,9 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
 
             await telemost.join()
 
-            # 2. Запуск записи
+            # 2. Запуск записи (передаём page для JS-захвата аудио)
             await update_meeting_status(session, meeting_id, "recording")
-            await capture.start()
+            await capture.start(page=telemost._page)
 
             # 3. Ожидание завершения встречи
             await telemost.wait_for_end()
