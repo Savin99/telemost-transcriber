@@ -14,6 +14,7 @@ import re
 
 import httpx
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message
@@ -25,7 +26,7 @@ TG_TOKEN = os.environ["TG_BOT_TOKEN"]
 BOT_API = os.getenv("BOT_API_URL", "http://localhost:8000")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
-bot = Bot(token=TG_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 # Regex для ссылок Телемоста
