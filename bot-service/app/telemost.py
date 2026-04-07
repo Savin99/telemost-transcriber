@@ -118,7 +118,7 @@ class TelemostSession:
         self._page.on("console", lambda msg: logger.debug("BROWSER: %s", msg.text))
 
         logger.info("Navigating to %s", self.meeting_url)
-        await self._page.goto(self.meeting_url, wait_until="networkidle")
+        await self._page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
         await self._log_url("after_navigate")
         await self._screenshot("after_navigate")
 
