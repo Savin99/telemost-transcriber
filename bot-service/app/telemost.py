@@ -17,11 +17,11 @@ CHROME_ARGS = [
     "--use-fake-device-for-media-stream",
     "--use-file-for-fake-audio-capture=/dev/null",
     "--autoplay-policy=no-user-gesture-required",
-    "--enable-audio-service-out-of-process",
     "--disable-web-security",
     "--use-gl=angle",
     "--use-angle=swiftshader",
     "--window-size=1920,1080",
+    "--disable-features=WebRtcHideLocalIpsWithMdns",
 ]
 
 
@@ -83,11 +83,19 @@ class TelemostSession:
         if not os.path.exists(chrome_path):
             chrome_path = None  # fallback на playwright chromium
 
+        # Ensure PulseAudio env is set for Chrome audio output
+        user_id = os.getuid()
+        launch_env = {
+            "DISPLAY": os.getenv("DISPLAY", ":99"),
+            "XDG_RUNTIME_DIR": os.getenv("XDG_RUNTIME_DIR", f"/run/user/{user_id}"),
+        }
+
         self._browser = await self._playwright.chromium.launch(
             headless=False,
             executable_path=chrome_path,
             args=CHROME_ARGS,
             ignore_default_args=["--mute-audio"],
+            env={**os.environ, **launch_env},
         )
 
         context = await self._browser.new_context(
