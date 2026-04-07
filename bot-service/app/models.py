@@ -1,6 +1,4 @@
-from datetime import datetime
 from typing import Optional
-from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -11,12 +9,12 @@ class JoinRequest(BaseModel):
 
 
 class MeetingStatus(BaseModel):
-    meeting_id: UUID
+    meeting_id: str
     status: str
     meeting_url: str
     duration_seconds: Optional[float] = None
     error_message: Optional[str] = None
-    created_at: datetime
+    created_at: Optional[str] = None
 
 
 class TranscriptSegment(BaseModel):
@@ -27,7 +25,7 @@ class TranscriptSegment(BaseModel):
 
 
 class TranscriptResponse(BaseModel):
-    meeting_id: UUID
+    meeting_id: str
     meeting_url: str
     duration_seconds: Optional[float] = None
     segments: list[TranscriptSegment]

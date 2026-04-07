@@ -1,9 +1,7 @@
 import asyncio
 import logging
 import os
-import uuid
 from contextlib import asynccontextmanager
-from uuid import UUID
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
@@ -16,6 +14,7 @@ from .database import (
     TranscriptSegmentDB,
     async_session,
     get_session,
+    init_db,
     update_meeting_status,
 )
 from .models import (
@@ -31,15 +30,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://transcriber:8001")
-RECORDINGS_DIR = "/app/recordings"
+RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
 
-# Активные сессии: meeting_id → {"session": TelemostSession, "capture": AudioCapture, "task": Task}
-active_sessions: dict[UUID, dict] = {}
+# Активные сессии: meeting_id (str) → {"session": TelemostSession, "capture": AudioCapture, "task": Task}
+active_sessions: dict[str, dict] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    await init_db()
     yield
     # Остановить все активные сессии
     for meeting_id in list(active_sessions.keys()):
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Telemost Bot", lifespan=lifespan)
 
 
-async def _bot_workflow(meeting_id: UUID, meeting_url: str, bot_name: str):
+async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
     """Основной workflow бота: вход → запись → транскрипция."""
     async with async_session() as session:
         try:
@@ -124,7 +124,7 @@ async def _transcribe(recording_path: str) -> list[dict]:
         return response.json()["segments"]
 
 
-async def _stop_session(meeting_id: UUID):
+async def _stop_session(meeting_id: str):
     """Остановить активную сессию."""
     info = active_sessions.get(meeting_id)
     if not info:
@@ -153,14 +153,16 @@ async def join_meeting(
     await session.commit()
     await session.refresh(meeting)
 
+    meeting_id = meeting.id
+
     # Запуск workflow в фоне
     task = asyncio.create_task(
-        _bot_workflow(meeting.id, request.meeting_url, request.bot_name)
+        _bot_workflow(meeting_id, request.meeting_url, request.bot_name)
     )
-    if meeting.id in active_sessions:
-        active_sessions[meeting.id]["task"] = task
+    if meeting_id in active_sessions:
+        active_sessions[meeting_id]["task"] = task
     else:
-        active_sessions[meeting.id] = {"task": task}
+        active_sessions[meeting_id] = {"task": task}
 
     return MeetingStatus(
         meeting_id=meeting.id,
@@ -172,7 +174,7 @@ async def join_meeting(
 
 @app.post("/leave/{meeting_id}", response_model=MeetingStatus)
 async def leave_meeting(
-    meeting_id: UUID,
+    meeting_id: str,
     session: AsyncSession = Depends(get_session),
 ):
     """Отключить бота от встречи и запустить транскрипцию."""
@@ -201,7 +203,7 @@ async def leave_meeting(
 
 @app.get("/status/{meeting_id}", response_model=MeetingStatus)
 async def get_status(
-    meeting_id: UUID,
+    meeting_id: str,
     session: AsyncSession = Depends(get_session),
 ):
     """Получить статус встречи."""
@@ -228,7 +230,7 @@ async def get_status(
 
 @app.get("/transcripts/{meeting_id}", response_model=TranscriptResponse)
 async def get_transcript(
-    meeting_id: UUID,
+    meeting_id: str,
     session: AsyncSession = Depends(get_session),
 ):
     """Получить транскрипт встречи."""

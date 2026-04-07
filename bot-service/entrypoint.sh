@@ -1,20 +1,25 @@
 #!/bin/bash
 set -e
 
-# Запуск виртуального дисплея
+# --- Виртуальный дисплей ---
 echo "Starting Xvfb..."
 Xvfb :99 -screen 0 1920x1080x24 -ac &
 export DISPLAY=:99
 sleep 1
 
-# Запуск PulseAudio
+# --- PulseAudio (user mode, работает и от root) ---
 echo "Starting PulseAudio..."
+USER_ID=$(id -u)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/${USER_ID}}
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 pulseaudio --kill 2>/dev/null || true
 sleep 1
 pulseaudio -D --exit-idle-time=-1 --log-level=info 2>&1
-sleep 3
+sleep 5
 
-# Создание виртуального аудио-устройства
+# --- Виртуальный аудио-sink ---
 if pgrep -x "pulseaudio" > /dev/null; then
     echo "PulseAudio is running"
 
@@ -30,7 +35,7 @@ if pgrep -x "pulseaudio" > /dev/null; then
 
     # Проверяем что monitor-source доступен для FFmpeg
     if pactl list sources short | grep -q "virtual_output.monitor"; then
-        echo "Monitor source virtual_output.monitor is available"
+        echo "Monitor source virtual_output.monitor is available for ffmpeg"
     else
         echo "WARNING: Monitor source not found!"
     fi
@@ -39,6 +44,6 @@ else
     exit 1
 fi
 
-# Запуск FastAPI
+# --- FastAPI ---
 echo "Starting FastAPI..."
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000

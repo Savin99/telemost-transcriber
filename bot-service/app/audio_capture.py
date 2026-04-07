@@ -6,6 +6,15 @@ import time
 logger = logging.getLogger(__name__)
 
 
+async def _exec(cmd: str) -> str:
+    """Run a shell command and return stdout."""
+    proc = await asyncio.create_subprocess_shell(
+        cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode().strip()
+
+
 class AudioCapture:
     """Захват аудио из PulseAudio через FFmpeg."""
 
@@ -20,21 +29,52 @@ class AudioCapture:
             return None
         return time.time() - self._start_time
 
+    async def _ensure_pulse_sink(self):
+        """Проверить наличие virtual_output.monitor, восстановить если нет."""
+        check = await _exec("pactl list sources short 2>/dev/null | grep virtual_output.monitor")
+        if check:
+            logger.info("PulseAudio virtual_output.monitor is available")
+            return
+
+        logger.warning("virtual_output.monitor not found, attempting recovery...")
+        await _exec("pulseaudio --kill 2>/dev/null || true")
+        await asyncio.sleep(1)
+        await _exec("pulseaudio -D --exit-idle-time=-1 --log-level=info 2>&1")
+        await asyncio.sleep(2)
+        await _exec(
+            'pactl load-module module-null-sink '
+            'sink_name=virtual_output '
+            'sink_properties=device.description="Virtual_Output"'
+        )
+        await _exec("pactl set-default-sink virtual_output")
+
+        # Verify
+        check = await _exec("pactl list sources short 2>/dev/null | grep virtual_output.monitor")
+        if not check:
+            raise RuntimeError("Failed to create virtual_output.monitor PulseAudio source")
+        logger.info("PulseAudio virtual_output.monitor recovered")
+
     async def start(self):
         """Запуск записи аудио."""
+        await self._ensure_pulse_sink()
+
+        user_id = os.getuid()
+        xdg_runtime = os.getenv("XDG_RUNTIME_DIR", f"/run/user/{user_id}")
+
         env = {
             **os.environ,
             "DISPLAY": os.getenv("DISPLAY", ":99"),
-            "XDG_RUNTIME_DIR": os.getenv("XDG_RUNTIME_DIR", "/run/user/0"),
+            "XDG_RUNTIME_DIR": xdg_runtime,
         }
 
         args = [
             "ffmpeg",
             "-y",
+            "-loglevel", "info",
             "-f", "pulse",
-            "-i", "virtual_output.monitor",
             "-ac", "1",
             "-ar", "16000",
+            "-i", "virtual_output.monitor",
             "-c:a", "pcm_s16le",
             self.output_path,
         ]

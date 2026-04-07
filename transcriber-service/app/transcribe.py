@@ -59,9 +59,10 @@ class TranscriberPipeline:
             hf_token = os.getenv("HF_TOKEN")
             if not hf_token:
                 return None
-            import whisperx
-            self._diarize_model = whisperx.DiarizationPipeline(
-                use_auth_token=hf_token,
+            from whisperx.diarize import DiarizationPipeline
+            self._diarize_model = DiarizationPipeline(
+                model_name="pyannote/speaker-diarization-3.1",
+                token=hf_token,
                 device=self.device,
             )
         return self._diarize_model
