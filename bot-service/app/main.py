@@ -94,9 +94,9 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
                 db_segment = TranscriptSegmentDB(
                     meeting_id=meeting_id,
                     speaker=seg.get("speaker"),
-                    start_time=seg["start"],
-                    end_time=seg["end"],
-                    text=seg["text"],
+                    start_time=float(seg["start"]),
+                    end_time=float(seg["end"]),
+                    text=str(seg["text"]),
                 )
                 session.add(db_segment)
             await session.commit()
@@ -106,9 +106,11 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
 
         except Exception as e:
             logger.exception("Error processing meeting %s", meeting_id)
-            await update_meeting_status(
-                session, meeting_id, "error", error_message=str(e)
-            )
+            await session.rollback()
+            async with async_session() as err_session:
+                await update_meeting_status(
+                    err_session, meeting_id, "error", error_message=str(e)
+                )
         finally:
             active_sessions.pop(meeting_id, None)
 
