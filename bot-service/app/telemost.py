@@ -52,6 +52,28 @@ class TelemostSession:
         except Exception as e:
             logger.warning("Screenshot '%s' failed: %s", name, e)
 
+    async def _dump_html(self, name: str):
+        """Сохранить HTML страницы для отладки селекторов."""
+        if self._page is None or self._page.is_closed():
+            return
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+        path = os.path.join(SCREENSHOTS_DIR, f"{name}.html")
+        try:
+            html = await self._page.content()
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info("HTML dump saved: %s", path)
+        except Exception as e:
+            logger.warning("HTML dump '%s' failed: %s", name, e)
+
+    async def _log_url(self, label: str):
+        """Залогировать текущий URL страницы."""
+        if self._page and not self._page.is_closed():
+            url = self._page.url
+            logger.info("[%s] Current URL: %s", label, url)
+            return url
+        return ""
+
     async def join(self):
         """Войти в Телемост как гость."""
         self._playwright = await async_playwright().start()
@@ -83,53 +105,39 @@ class TelemostSession:
         self._page = await context.new_page()
         self._page.on("close", lambda _: self._meeting_ended.set())
 
+        # Логируем console.log из браузера для отладки WebRTC
+        self._page.on("console", lambda msg: logger.debug("BROWSER: %s", msg.text))
+
         logger.info("Navigating to %s", self.meeting_url)
         await self._page.goto(self.meeting_url, wait_until="networkidle")
+        await self._log_url("after_navigate")
         await self._screenshot("after_navigate")
 
         # Ввод имени гостя
         await self._enter_name()
         await self._screenshot("after_enter_name")
 
-        # Нажать "Присоединиться"
+        # Отключить камеру и микрофон ДО подключения (на pre-join экране)
+        await self._mute_devices_prejoin()
+
+        # Нажать "Подключиться"
         await self._click_join()
-        await self._screenshot("after_click_join")
 
-        # Отключить камеру и микрофон
-        await self._mute_devices()
-        await self._screenshot("after_mute_devices")
+        # Проверить что мы действительно в комнате
+        await self._verify_joined()
 
-        # Дополнительный скриншот через 5 секунд — видно ли комнату
-        await asyncio.sleep(5)
-        await self._screenshot("in_meeting_5s")
-
-        # Дамп HTML для отладки
+        # Дамп для отладки
         await self._dump_html("after_join")
 
         logger.info("Successfully joined meeting as '%s'", self.bot_name)
 
-    async def _dump_html(self, name: str):
-        """Сохранить HTML страницы для отладки селекторов."""
-        if self._page is None or self._page.is_closed():
-            return
-        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
-        path = os.path.join(SCREENSHOTS_DIR, f"{name}.html")
-        try:
-            html = await self._page.content()
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html)
-            logger.info("HTML dump saved: %s", path)
-        except Exception as e:
-            logger.warning("HTML dump '%s' failed: %s", name, e)
-
     async def _enter_name(self):
         """Ввести имя бота в поле гостевого входа."""
-        # Телемост показывает поле для ввода имени гостя
-        # Пробуем несколько вариантов селекторов
         selectors = [
             'input[data-testid="guest-name-input"]',
             'input[placeholder*="имя"]',
             'input[placeholder*="Имя"]',
+            'input[placeholder*="name"]',
             'input[type="text"]',
         ]
         for selector in selectors:
@@ -138,6 +146,8 @@ class TelemostSession:
                     selector, timeout=5000
                 )
                 if input_el:
+                    # Очистить поле перед вводом
+                    await input_el.click(click_count=3)
                     await input_el.fill(self.bot_name)
                     logger.info("Entered bot name using selector: %s", selector)
                     return
@@ -147,39 +157,16 @@ class TelemostSession:
         await self._screenshot("name_input_not_found")
         logger.warning("Could not find name input, proceeding without name entry")
 
-    async def _click_join(self):
-        """Нажать кнопку присоединения."""
-        selectors = [
-            'button:has-text("Присоединиться")',
-            'button:has-text("Продолжить")',
-            'button:has-text("Войти")',
-            '[data-testid="join-button"]',
-            'button.Orb-Button',
-        ]
-        for selector in selectors:
-            try:
-                btn = await self._page.wait_for_selector(selector, timeout=5000)
-                if btn:
-                    await btn.click()
-                    logger.info("Clicked join button: %s", selector)
-                    # Ждём загрузки интерфейса встречи
-                    await asyncio.sleep(3)
-                    await self._screenshot("after_join_wait")
-                    return
-            except Exception:
-                continue
-
-        await self._screenshot("join_button_not_found")
-        logger.warning("Could not find join button, may already be in meeting")
-
-    async def _mute_devices(self):
-        """Отключить камеру и микрофон бота."""
-        # Попытка найти и нажать кнопки выключения камеры/микрофона
+    async def _mute_devices_prejoin(self):
+        """Отключить камеру и микрофон на pre-join экране."""
+        # На pre-join экране есть иконки камеры/микрофона — пробуем их нажать
         mute_selectors = [
             '[data-testid="mic-button"]',
             '[data-testid="camera-button"]',
             'button[aria-label*="микрофон"]',
             'button[aria-label*="камер"]',
+            'button[aria-label*="Микрофон"]',
+            'button[aria-label*="Камер"]',
             'button[aria-label*="Microphone"]',
             'button[aria-label*="Camera"]',
         ]
@@ -187,19 +174,123 @@ class TelemostSession:
             try:
                 btn = await self._page.query_selector(selector)
                 if btn:
-                    # Проверяем, не выключено ли уже
-                    aria_pressed = await btn.get_attribute("aria-pressed")
-                    if aria_pressed != "false":
+                    is_active = await btn.get_attribute("aria-pressed")
+                    if is_active != "false":
                         await btn.click()
-                        logger.info("Muted device: %s", selector)
+                        logger.info("Muted device (pre-join): %s", selector)
             except Exception:
                 continue
+
+    async def _click_join(self):
+        """Нажать кнопку подключения к встрече."""
+        # Телемост использует "Подключиться" на pre-join экране
+        selectors = [
+            'button:has-text("Подключиться")',
+            'button:has-text("Присоединиться")',
+            'button:has-text("Продолжить")',
+            'button:has-text("Войти")',
+            '[data-testid="join-button"]',
+        ]
+
+        pre_click_url = await self._log_url("before_click_join")
+
+        for selector in selectors:
+            try:
+                btn = await self._page.wait_for_selector(selector, timeout=5000)
+                if btn:
+                    # Проверяем текст кнопки
+                    btn_text = await btn.text_content()
+                    logger.info("Found button '%s' via selector: %s", btn_text, selector)
+
+                    await btn.click()
+                    logger.info("Clicked join button: %s", selector)
+
+                    # Ждём навигацию или изменение страницы
+                    await asyncio.sleep(5)
+                    await self._log_url("after_click_join")
+                    await self._screenshot("after_click_join")
+                    return
+            except Exception:
+                continue
+
+        # Fallback: если стандартные селекторы не сработали,
+        # ищем любую зелёную кнопку с текстом (Телемост стилизует join-кнопку)
+        logger.warning("Standard selectors failed, trying fallback...")
+        try:
+            # Ищем кнопку по тексту напрямую через JS
+            btn = await self._page.evaluate_handle("""
+                () => {
+                    const buttons = document.querySelectorAll('button');
+                    for (const b of buttons) {
+                        const text = b.textContent.trim();
+                        if (text === 'Подключиться' || text === 'Присоединиться') {
+                            return b;
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if btn:
+                await btn.as_element().click()
+                logger.info("Clicked join button via JS fallback")
+                await asyncio.sleep(5)
+                await self._log_url("after_click_join_fallback")
+                await self._screenshot("after_click_join_fallback")
+                return
+        except Exception as e:
+            logger.warning("JS fallback failed: %s", e)
+
+        await self._screenshot("join_button_not_found")
+        logger.error("Could not find join button!")
+
+    async def _verify_joined(self):
+        """Проверить что мы действительно вошли в комнату встречи."""
+        await asyncio.sleep(3)
+        url = await self._log_url("verify_joined")
+        await self._screenshot("verify_joined")
+
+        # Если URL содержит /j/ — мы всё ещё на странице встречи (хорошо)
+        # Если URL — главная telemost.yandex.ru без /j/ — нас выкинуло
+        if url and "/j/" not in url:
+            logger.error(
+                "JOIN FAILED! Redirected to %s — not in meeting room. "
+                "Possible causes: WebRTC failure, meeting expired, or auth required.",
+                url,
+            )
+            await self._dump_html("join_failed")
+            raise RuntimeError(
+                f"Failed to join meeting: redirected to {url}"
+            )
+
+        # Проверяем наличие элементов комнаты (видео, кнопки управления)
+        room_indicators = [
+            'button:has-text("Покинуть")',
+            'button:has-text("Завершить")',
+            '[data-testid="leave-button"]',
+            'video',
+        ]
+        in_room = False
+        for selector in room_indicators:
+            try:
+                el = await self._page.query_selector(selector)
+                if el:
+                    logger.info("Room indicator found: %s", selector)
+                    in_room = True
+                    break
+            except Exception:
+                continue
+
+        if not in_room:
+            logger.warning(
+                "No room indicators found after join. URL: %s. "
+                "Bot may not be in the meeting.",
+                url,
+            )
 
     async def wait_for_end(self):
         """Ждать завершения встречи."""
         check_count = 0
         while not self._meeting_ended.is_set():
-            # Проверяем что страница жива
             if self._page is None or self._page.is_closed():
                 logger.info("Page closed, meeting ended")
                 break
@@ -216,7 +307,17 @@ class TelemostSession:
             except Exception:
                 pass
 
-            # Периодический скриншот каждые 60 секунд (12 * 5s)
+            # Проверяем, не выкинуло ли нас на главную
+            try:
+                url = self._page.url
+                if url and "/j/" not in url and "telemost" in url:
+                    logger.warning("Detected redirect away from meeting: %s", url)
+                    await self._screenshot("redirected_from_meeting")
+                    break
+            except Exception:
+                pass
+
+            # Периодический скриншот каждые 60 секунд
             check_count += 1
             if check_count % 12 == 0:
                 await self._screenshot(f"heartbeat_{check_count // 12}m")
@@ -230,7 +331,6 @@ class TelemostSession:
         if self._page and not self._page.is_closed():
             await self._screenshot("before_leave")
 
-            # Попробовать нажать "Покинуть"
             try:
                 leave_btn = await self._page.query_selector(
                     'button:has-text("Покинуть"), '
