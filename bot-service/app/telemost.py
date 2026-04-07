@@ -218,28 +218,7 @@ class TelemostSession:
             except Exception:
                 continue
 
-        # Дополнительно: попробовать через JS отключить все MediaStream треки
-        try:
-            await self._page.evaluate("""
-                () => {
-                    // Отключить все аудио-треки (микрофон)
-                    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-                        const streams = document.querySelectorAll('video, audio');
-                        streams.forEach(el => {
-                            if (el.srcObject) {
-                                el.srcObject.getAudioTracks().forEach(track => {
-                                    if (track.kind === 'audio' && track.readyState === 'live') {
-                                        track.enabled = false;
-                                    }
-                                });
-                            }
-                        });
-                    }
-                }
-            """)
-            logger.info("Disabled audio tracks via JS")
-        except Exception as e:
-            logger.debug("JS audio track disable failed: %s", e)
+        # НЕ отключаем аудиотреки через JS — это убивает входящий звук встречи!
 
     async def _mute_devices_prejoin(self):
         """Отключить камеру и микрофон на pre-join экране."""
