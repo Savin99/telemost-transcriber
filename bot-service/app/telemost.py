@@ -353,7 +353,15 @@ class TelemostSession:
     async def wait_for_end(self):
         """Ждать завершения встречи."""
         check_count = 0
-        while not self._meeting_ended.is_set():
+        while True:
+            # Проверяем event (ставится из /leave endpoint)
+            try:
+                await asyncio.wait_for(self._meeting_ended.wait(), timeout=5)
+                logger.info("Meeting ended (event set)")
+                break
+            except asyncio.TimeoutError:
+                pass
+
             if self._page is None or self._page.is_closed():
                 logger.info("Page closed, meeting ended")
                 break
