@@ -1,0 +1,12 @@
+*.m4a
+*.wav
+*.mp3
+*.json
+!docker-compose.yml
+!postgres/init.sql
+.env
+__pycache__/
+*.pyc
+recordings/
+test_*.py
+whisper_transcript.json

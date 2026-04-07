@@ -1,0 +1,54 @@
+services:
+  bot:
+    build: ./bot-service
+    ports:
+      - "8000:8000"
+    shm_size: "512m"
+    environment:
+      TRANSCRIBER_URL: http://transcriber:8001
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@postgres:5432/${POSTGRES_DB:-telemost_bot}
+      BOT_NAME: ${BOT_NAME:-Транскрибатор}
+    volumes:
+      - recordings:/app/recordings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      transcriber:
+        condition: service_started
+
+  transcriber:
+    build: ./transcriber-service
+    ports:
+      - "8001:8001"
+    environment:
+      HF_TOKEN: ${HF_TOKEN}
+    volumes:
+      - recordings:/app/recordings
+      - models:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB: ${POSTGRES_DB:-telemost_bot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  recordings:
+  models:
+  pgdata:
