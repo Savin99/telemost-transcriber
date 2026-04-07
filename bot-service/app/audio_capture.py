@@ -203,7 +203,9 @@ class AudioCapture:
     async def _stop_js_capture(self) -> bool:
         """Остановить JS MediaRecorder и сохранить аудио."""
         try:
-            data_b64 = await self._page.evaluate(STOP_AND_GET_JS)
+            data_b64 = await asyncio.wait_for(
+                self._page.evaluate(STOP_AND_GET_JS), timeout=15
+            )
             if data_b64:
                 webm_path = self.output_path + ".webm"
                 data = base64.b64decode(data_b64)
