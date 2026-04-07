@@ -171,10 +171,24 @@ if ! kill -0 $BOT_PID 2>/dev/null; then
     exit 1
 fi
 
+# --- Telegram Bot ---
+if [ -n "${TG_BOT_TOKEN:-}" ]; then
+    cd "$APP/tg-bot"
+    pip install -q --no-cache-dir aiogram>=3.10 httpx>=0.28 2>/dev/null
+    TG_BOT_TOKEN="$TG_BOT_TOKEN" \
+    BOT_API_URL="http://localhost:8000" \
+    nohup python bot.py \
+        > "$LOGS/tg-bot.log" 2>&1 &
+    echo "tg-bot запущен (PID $!)"
+else
+    echo "TG_BOT_TOKEN не задан — Telegram-бот не запущен"
+fi
+
 echo ""
 echo "=== Деплой завершён ==="
 echo "  Bot API:         http://localhost:8000/docs"
 echo "  Transcriber API: http://localhost:8001/docs"
+echo "  Telegram Bot:    ${TG_BOT_TOKEN:+запущен}${TG_BOT_TOKEN:-не запущен (нет TG_BOT_TOKEN)}"
 echo "  Логи:            $LOGS/"
 echo "  БД SQLite:       $DB_PATH"
 echo "  Записи:          $RECORDINGS/"
@@ -182,6 +196,3 @@ echo ""
 echo "Проверка health:"
 curl -s http://localhost:8001/health && echo ""
 curl -s http://localhost:8000/health && echo ""
-echo ""
-echo "Пример запуска:"
-echo '  curl -X POST http://localhost:8000/join -H "Content-Type: application/json" -d '"'"'{"meeting_url": "https://telemost.yandex.ru/j/XXXXXXXXXX"}'"'"
