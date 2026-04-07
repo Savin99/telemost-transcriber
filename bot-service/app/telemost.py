@@ -15,6 +15,7 @@ CHROME_ARGS = [
     "--disable-setuid-sandbox",
     "--use-fake-ui-for-media-stream",
     "--use-fake-device-for-media-stream",
+    "--use-file-for-fake-audio-capture=/dev/null",
     "--autoplay-policy=no-user-gesture-required",
     "--enable-audio-service-out-of-process",
     "--disable-web-security",
