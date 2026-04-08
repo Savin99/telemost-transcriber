@@ -97,13 +97,18 @@ class TranscriberPipeline:
         # 4. Диаризация (если HF_TOKEN доступен)
         diarize_pipeline = self.diarize_model
         if diarize_pipeline is not None:
-            logger.info("Running diarization...")
+            logger.info(
+                "Running diarization (num=%s, min=%s, max=%s)...",
+                num_speakers, min_speakers, max_speakers,
+            )
+            # Передаём путь к файлу, не numpy — pyannote лучше работает с файлами
             diarize_segments = diarize_pipeline(
-                audio,
+                audio_path,
                 num_speakers=num_speakers,
                 min_speakers=min_speakers or num_speakers,
                 max_speakers=max_speakers or num_speakers,
             )
+            logger.info("Diarization found %d segments", len(diarize_segments))
             result = whisperx.assign_word_speakers(diarize_segments, result)
 
         # 5. Формирование результата
