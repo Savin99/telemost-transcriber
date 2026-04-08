@@ -1,117 +1,28 @@
 import asyncio
-import base64
 import logging
 import os
+import subprocess
 import time
-
-from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
-# JS-код для захвата аудио через Web Audio API
-# Перехватывает ВСЕ RTCPeerConnection треки и записывает через MediaRecorder
-CAPTURE_JS = """
-() => {
-    return new Promise((resolve) => {
-        // Подменяем RTCPeerConnection чтобы ловить входящие аудио-треки
-        const audioTracks = [];
-        const origAddTrack = RTCPeerConnection.prototype.addTrack;
-        const origSetRemote = RTCPeerConnection.prototype.setRemoteDescription;
-
-        // Ждём когда появятся remote аудио треки
-        const checkInterval = setInterval(() => {
-            const audios = document.querySelectorAll('audio, video');
-            audios.forEach(el => {
-                if (el.srcObject && !el._captured) {
-                    el._captured = true;
-                    el.srcObject.getAudioTracks().forEach(track => {
-                        if (track.kind === 'audio') {
-                            audioTracks.push(track);
-                        }
-                    });
-                }
-            });
-
-            if (audioTracks.length > 0) {
-                clearInterval(checkInterval);
-
-                // Создаём AudioContext для микширования
-                const ctx = new AudioContext({ sampleRate: 16000 });
-                const dest = ctx.createMediaStreamDestination();
-
-                audioTracks.forEach(track => {
-                    const stream = new MediaStream([track]);
-                    const source = ctx.createMediaStreamSource(stream);
-                    source.connect(dest);
-                });
-
-                // MediaRecorder для записи
-                const recorder = new MediaRecorder(dest.stream, {
-                    mimeType: 'audio/webm;codecs=opus'
-                });
-                const chunks = [];
-                recorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) chunks.push(e.data);
-                };
-                recorder.start(1000); // chunk каждую секунду
-
-                window._audioRecorder = recorder;
-                window._audioChunks = chunks;
-                window._audioCtx = ctx;
-
-                resolve('recording');
-            }
-        }, 500);
-
-        // Таймаут 30 секунд
-        setTimeout(() => {
-            clearInterval(checkInterval);
-            if (audioTracks.length === 0) {
-                resolve('no_audio_tracks');
-            }
-        }, 30000);
-    });
-}
-"""
-
-STOP_AND_GET_JS = """
-() => {
-    return new Promise((resolve) => {
-        const recorder = window._audioRecorder;
-        const chunks = window._audioChunks;
-
-        if (!recorder) {
-            resolve(null);
-            return;
-        }
-
-        recorder.onstop = async () => {
-            const blob = new Blob(chunks, { type: 'audio/webm' });
-            const buffer = await blob.arrayBuffer();
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-
-            if (window._audioCtx) {
-                window._audioCtx.close();
-            }
-
-            resolve(base64);
-        };
-
-        recorder.stop();
-    });
-}
-"""
-
 
 class AudioCapture:
-    """Захват аудио встречи через JS MediaRecorder + FFmpeg fallback."""
+    """Захват аудио встречи через PulseAudio per-session sink + FFmpeg.
 
-    def __init__(self, output_path: str):
+    Подход из hh-recruiter-bot:
+    1. Создаём отдельный PulseAudio null-sink для сессии
+    2. Перенаправляем аудио-выход Chrome на этот sink
+    3. FFmpeg пишет из sink.monitor
+    """
+
+    def __init__(self, output_path: str, session_id: str = "default"):
         self.output_path = output_path
-        self._page: Page | None = None
+        self.session_id = session_id
         self._ffmpeg_process: asyncio.subprocess.Process | None = None
         self._start_time: float | None = None
-        self._js_capture_active = False
+        self._sink_name: str | None = None
+        self._sink_module_index: int | None = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -119,31 +30,107 @@ class AudioCapture:
             return None
         return time.time() - self._start_time
 
-    async def start(self, page: Page = None):
-        """Запуск записи аудио."""
+    def _create_session_sink(self):
+        """Создать per-session PulseAudio null-sink."""
+        sink_name = f"sink_{self.session_id.replace('-', '_')}"
+        try:
+            result = subprocess.run(
+                [
+                    "pactl", "load-module", "module-null-sink",
+                    f"sink_name={sink_name}",
+                    f'sink_properties=device.description="{sink_name}"',
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            module_index = int(result.stdout.strip())
+            self._sink_name = sink_name
+            self._sink_module_index = module_index
+            logger.info(
+                "[%s] Created PulseAudio sink: %s (module %d)",
+                self.session_id, sink_name, module_index,
+            )
+        except Exception as e:
+            logger.error("[%s] Failed to create PulseAudio sink: %s", self.session_id, e)
+            raise RuntimeError("PulseAudio sink creation failed") from e
+
+    def _move_chrome_to_sink(self):
+        """Перенаправить аудио-выход Chrome на наш sink."""
+        moved = 0
+        for attempt in range(5):
+            try:
+                result = subprocess.run(
+                    ["pactl", "list", "sink-inputs", "short"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in result.stdout.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("\t")
+                    input_index = parts[0]
+                    current_sink = parts[1] if len(parts) > 1 else ""
+                    if current_sink != self._sink_name:
+                        try:
+                            subprocess.run(
+                                ["pactl", "move-sink-input", input_index, self._sink_name],
+                                check=True, timeout=5,
+                            )
+                            moved += 1
+                            logger.info(
+                                "[%s] Moved sink-input %s -> %s",
+                                self.session_id, input_index, self._sink_name,
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            if moved > 0:
+                break
+            if attempt < 4:
+                import time as _time
+                _time.sleep(1)
+
+        if moved == 0:
+            logger.warning(
+                "[%s] No sink-inputs moved to %s — Chrome may not be outputting audio yet",
+                self.session_id, self._sink_name,
+            )
+        return moved
+
+    def _destroy_session_sink(self):
+        """Удалить per-session PulseAudio sink."""
+        if self._sink_module_index is not None:
+            try:
+                subprocess.run(
+                    ["pactl", "unload-module", str(self._sink_module_index)],
+                    check=False, timeout=5,
+                )
+                logger.info(
+                    "[%s] Destroyed PulseAudio sink (module %d)",
+                    self.session_id, self._sink_module_index,
+                )
+            except Exception:
+                logger.info("[%s] Sink already destroyed or not found", self.session_id)
+            self._sink_module_index = None
+            self._sink_name = None
+
+    async def start(self, page=None):
+        """Запуск записи аудио через PulseAudio + FFmpeg."""
         self._start_time = time.time()
-        self._page = page
 
-        if page:
-            await self._start_js_capture(page)
+        # 1. Создаём per-session PulseAudio sink
+        self._create_session_sink()
 
-        # Всегда запускаем FFmpeg как fallback
+        # 2. Перенаправляем Chrome аудио на наш sink
+        self._move_chrome_to_sink()
+
+        # 3. Запускаем FFmpeg для записи из sink.monitor
         await self._start_ffmpeg()
 
-    async def _start_js_capture(self, page: Page):
-        """Запустить захват через JavaScript MediaRecorder."""
-        try:
-            result = await page.evaluate(CAPTURE_JS)
-            if result == 'recording':
-                self._js_capture_active = True
-                logger.info("JS audio capture started (MediaRecorder)")
-            else:
-                logger.warning("JS audio capture: %s", result)
-        except Exception as e:
-            logger.warning("JS audio capture failed: %s", e)
-
     async def _start_ffmpeg(self):
-        """Запустить FFmpeg для записи из PulseAudio (fallback)."""
+        """Запустить FFmpeg для записи из per-session PulseAudio sink."""
+        monitor_source = f"{self._sink_name}.monitor"
+
         user_id = os.getuid()
         xdg_runtime = os.getenv("XDG_RUNTIME_DIR", f"/run/user/{user_id}")
 
@@ -155,8 +142,10 @@ class AudioCapture:
 
         args = [
             "ffmpeg", "-y", "-loglevel", "warning",
-            "-f", "pulse", "-ac", "1", "-ar", "16000",
-            "-i", "virtual_output.monitor",
+            "-f", "pulse",
+            "-i", monitor_source,
+            "-ac", "1",
+            "-ar", "16000",
             "-c:a", "pcm_s16le",
             self.output_path,
         ]
@@ -172,92 +161,62 @@ class AudioCapture:
             await asyncio.sleep(2)
             if self._ffmpeg_process.returncode is not None:
                 stderr = await self._ffmpeg_process.stderr.read()
-                logger.warning("FFmpeg fallback failed: %s", stderr.decode())
+                logger.error(
+                    "[%s] FFmpeg failed to start: %s",
+                    self.session_id, stderr.decode(),
+                )
                 self._ffmpeg_process = None
+                raise RuntimeError("FFmpeg failed to start — check PulseAudio configuration")
             else:
-                logger.info("FFmpeg fallback recording started (pid=%d)", self._ffmpeg_process.pid)
+                logger.info(
+                    "[%s] FFmpeg recording started (pid=%d) -> %s",
+                    self.session_id, self._ffmpeg_process.pid, self.output_path,
+                )
+        except RuntimeError:
+            raise
         except Exception as e:
-            logger.warning("FFmpeg fallback start failed: %s", e)
+            logger.error("[%s] FFmpeg start failed: %s", self.session_id, e)
+            raise
 
     async def stop(self) -> float | None:
         """Остановка записи. Возвращает длительность в секундах."""
         duration = self.duration_seconds
 
-        # 1. Попробовать получить аудио из JS
-        js_saved = False
-        if self._js_capture_active and self._page and not self._page.is_closed():
-            js_saved = await self._stop_js_capture()
-
-        # 2. Остановить FFmpeg
+        # 1. Остановить FFmpeg
         await self._stop_ffmpeg()
 
-        # Если JS захват дал данные, конвертировать webm → wav
-        if js_saved:
-            webm_path = self.output_path + ".webm"
-            if os.path.exists(webm_path) and os.path.getsize(webm_path) > 100:
-                await self._convert_webm_to_wav(webm_path)
+        # 2. Удалить PulseAudio sink
+        self._destroy_session_sink()
 
         self._start_time = None
         return duration
-
-    async def _stop_js_capture(self) -> bool:
-        """Остановить JS MediaRecorder и сохранить аудио."""
-        try:
-            data_b64 = await asyncio.wait_for(
-                self._page.evaluate(STOP_AND_GET_JS), timeout=15
-            )
-            if data_b64:
-                webm_path = self.output_path + ".webm"
-                data = base64.b64decode(data_b64)
-                with open(webm_path, "wb") as f:
-                    f.write(data)
-                logger.info("JS audio saved: %s (%d bytes)", webm_path, len(data))
-                return True
-            else:
-                logger.warning("JS audio capture returned no data")
-        except Exception as e:
-            logger.warning("JS audio stop failed: %s", e)
-        return False
-
-    async def _convert_webm_to_wav(self, webm_path: str):
-        """Конвертировать webm в wav через FFmpeg."""
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", webm_path,
-            "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
-            self.output_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            logger.info("Converted webm → wav: %s", self.output_path)
-            os.remove(webm_path)
-        else:
-            logger.warning("webm→wav conversion failed: %s", stderr.decode())
 
     async def _stop_ffmpeg(self):
         """Остановить FFmpeg."""
         if self._ffmpeg_process is None:
             return
 
-        logger.info("Stopping FFmpeg...")
+        logger.info("[%s] Stopping FFmpeg...", self.session_id)
+
+        # Отправляем 'q' для graceful stop
         try:
             if self._ffmpeg_process.stdin:
-                self._ffmpeg_process.stdin.write(b"q\n")
+                self._ffmpeg_process.stdin.write(b"q")
                 await self._ffmpeg_process.stdin.drain()
                 self._ffmpeg_process.stdin.close()
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+        # Ждём завершения до 5 секунд
         try:
-            await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=10)
+            await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=5)
         except asyncio.TimeoutError:
             self._ffmpeg_process.terminate()
             try:
-                await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=5)
+                await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=3)
             except asyncio.TimeoutError:
                 self._ffmpeg_process.kill()
                 await self._ffmpeg_process.wait()
 
         self._ffmpeg_process = None
-        logger.info("FFmpeg stopped")
+        logger.info("[%s] FFmpeg stopped", self.session_id)

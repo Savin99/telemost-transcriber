@@ -56,7 +56,7 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
             # 1. Вход в Телемост
             telemost = TelemostSession(meeting_url, bot_name)
             recording_path = os.path.join(RECORDINGS_DIR, f"{meeting_id}.wav")
-            capture = AudioCapture(recording_path)
+            capture = AudioCapture(recording_path, session_id=meeting_id)
 
             active_sessions[meeting_id] = {
                 "session": telemost,
@@ -65,9 +65,9 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
 
             await telemost.join()
 
-            # 2. Запуск записи (передаём page для JS-захвата аудио)
+            # 2. Запуск записи (PulseAudio per-session sink + FFmpeg)
             await update_meeting_status(session, meeting_id, "recording")
-            await capture.start(page=telemost._page)
+            await capture.start()
 
             # 3. Ожидание завершения встречи
             await telemost.wait_for_end()

@@ -14,14 +14,14 @@ CHROME_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--use-fake-ui-for-media-stream",
-    "--use-fake-device-for-media-stream",
-    "--use-file-for-fake-audio-capture=/dev/null",
     "--autoplay-policy=no-user-gesture-required",
     "--disable-web-security",
     "--use-gl=angle",
     "--use-angle=swiftshader",
     "--window-size=1920,1080",
     "--disable-features=WebRtcHideLocalIpsWithMdns",
+    "--disable-blink-features=AutomationControlled",
+    "--lang=ru-RU,ru",
 ]
 
 
