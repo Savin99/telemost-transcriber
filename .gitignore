@@ -5,6 +5,7 @@
 !docker-compose.yml
 !postgres/init.sql
 .env
+.env.deploy
 __pycache__/
 *.pyc
 recordings/
