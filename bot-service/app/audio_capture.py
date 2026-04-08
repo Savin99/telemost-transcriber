@@ -54,47 +54,35 @@ class AudioCapture:
             raise RuntimeError("PulseAudio sink creation failed") from e
 
     def _move_chrome_to_sink(self):
-        """Перенаправить аудио-выход Chrome на наш sink."""
+        """Перенаправить аудио-выход Chrome на наш sink. Возвращает кол-во перемещённых."""
         moved = 0
-        for attempt in range(5):
-            try:
-                result = subprocess.run(
-                    ["pactl", "list", "sink-inputs", "short"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                for line in result.stdout.strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    parts = line.split("\t")
-                    input_index = parts[0]
-                    current_sink = parts[1] if len(parts) > 1 else ""
-                    if current_sink != self._sink_name:
-                        try:
-                            subprocess.run(
-                                ["pactl", "move-sink-input", input_index, self._sink_name],
-                                check=True, timeout=5,
-                            )
-                            moved += 1
-                            logger.info(
-                                "[%s] Moved sink-input %s -> %s",
-                                self.session_id, input_index, self._sink_name,
-                            )
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            if moved > 0:
-                break
-            if attempt < 4:
-                import time as _time
-                _time.sleep(1)
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "sink-inputs", "short"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                input_index = parts[0]
+                try:
+                    subprocess.run(
+                        ["pactl", "move-sink-input", input_index, self._sink_name],
+                        check=True, timeout=5,
+                    )
+                    moved += 1
+                    logger.info(
+                        "[%s] Moved sink-input %s -> %s",
+                        self.session_id, input_index, self._sink_name,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         if moved == 0:
-            logger.warning(
-                "[%s] No sink-inputs moved to %s — Chrome may not be outputting audio yet",
-                self.session_id, self._sink_name,
-            )
+            logger.debug("[%s] No sink-inputs found yet", self.session_id)
         return moved
 
     def _destroy_session_sink(self):
@@ -121,8 +109,13 @@ class AudioCapture:
         # 1. Создаём per-session PulseAudio sink
         self._create_session_sink()
 
-        # 2. Перенаправляем Chrome аудио на наш sink
-        self._move_chrome_to_sink()
+        # 2. Ждём пока Chrome создаст sink-input (до 10 секунд)
+        #    Chrome создаёт аудио-выход с задержкой после входа в WebRTC-комнату
+        for attempt in range(10):
+            moved = self._move_chrome_to_sink()
+            if moved > 0:
+                break
+            await asyncio.sleep(1)
 
         # 3. Запускаем FFmpeg для записи из sink.monitor
         await self._start_ffmpeg()
