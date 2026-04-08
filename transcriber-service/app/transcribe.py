@@ -101,9 +101,8 @@ class TranscriberPipeline:
                 "Running diarization (num=%s, min=%s, max=%s)...",
                 num_speakers, min_speakers, max_speakers,
             )
-            # Передаём путь к файлу, не numpy — pyannote лучше работает с файлами
             diarize_segments = diarize_pipeline(
-                audio_path,
+                audio,
                 num_speakers=num_speakers,
                 min_speakers=min_speakers or num_speakers,
                 max_speakers=max_speakers or num_speakers,
