@@ -145,14 +145,11 @@ class TelemostSession:
         # Нажать "Подключиться" — через JS .click()
         await self._click_join()
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(8)
         await self._screenshot("after_join_wait")
 
-        # Мьютим микрофон после подключения
-        await self._mute_mic_in_room()
-        await asyncio.sleep(3)
-
-        # Замьютить микрофон Chrome через PulseAudio
+        # Мьютим микрофон ТОЛЬКО через PulseAudio — НЕ через UI!
+        # UI-мьют убивает WebRTC аудио-пайплайн, PulseAudio просто глушит вход
         await self._mute_chrome_mic()
 
         await self._dump_html("after_join")
@@ -184,23 +181,26 @@ class TelemostSession:
             logger.warning("Could not find name input")
 
     async def _mute_devices_prejoin(self):
-        """Отключить микрофон и камеру на pre-join экране через JS + data-testid."""
+        """Отключить ТОЛЬКО камеру на pre-join. Микрофон оставляем ВКЛ!
+
+        WebRTC требует активный микрофон для установки аудио-пайплайна.
+        Если замьютить микрофон до входа — Chrome не получает аудио от других.
+        Микрофон мьютим после входа через PulseAudio (pactl set-source-output-mute).
+        """
         await self._page.evaluate("""
             () => {
-                // Terra-clan data-testid selectors
-                const micBtn = document.querySelector('button[data-testid="turn-off-mic-button"]');
-                if (micBtn) micBtn.click();
+                // Только камера! Микрофон НЕ трогаем
                 const camBtn = document.querySelector('button[data-testid="turn-off-cam-button"]');
                 if (camBtn) camBtn.click();
                 // Fallback: aria-label
                 const btns = Array.from(document.querySelectorAll('button'));
                 btns.forEach(b => {
                     const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                    if (label.includes('камер') || label.includes('микрофон')) b.click();
+                    if (label.includes('камер') && !label.includes('микрофон')) b.click();
                 });
             }
         """)
-        logger.info("Muted mic+camera (pre-join) via JS")
+        logger.info("Muted camera only (pre-join) — mic stays ON for WebRTC audio")
 
     async def _click_join(self):
         """Нажать кнопку подключения через JS .click() — обходит overlay."""
