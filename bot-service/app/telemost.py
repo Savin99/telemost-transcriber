@@ -18,8 +18,6 @@ CHROME_ARGS = [
     "--disable-gpu",
     "--window-size=1280,720",
     "--use-fake-ui-for-media-stream",
-    "--use-fake-device-for-media-stream",
-    "--enable-audio-service-sandbox=false",
     "--autoplay-policy=no-user-gesture-required",
     "--disable-features=WebRtcHideLocalIpsWithMdns",
     "--disable-blink-features=AutomationControlled",
