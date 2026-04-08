@@ -57,11 +57,7 @@ PROCESSED_MARKER = "transcribed"
 
 def list_new_audio_files(service) -> list[dict]:
     """Получить список необработанных аудиофайлов из папки Drive."""
-    query = (
-        f"'{GDRIVE_FOLDER_ID}' in parents"
-        f" and trashed = false"
-        f" and not description contains '{PROCESSED_MARKER}'"
-    )
+    query = f"'{GDRIVE_FOLDER_ID}' in parents and trashed = false"
     results = (
         service.files()
         .list(
@@ -75,6 +71,10 @@ def list_new_audio_files(service) -> list[dict]:
 
     audio_files = []
     for f in files:
+        # Пропускаем уже обработанные
+        desc = f.get("description") or ""
+        if PROCESSED_MARKER in desc:
+            continue
         name = f.get("name", "")
         mime = f.get("mimeType", "")
         ext = Path(name).suffix.lower()
