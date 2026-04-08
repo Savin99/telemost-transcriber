@@ -125,10 +125,16 @@ class TelemostSession:
         await self._screenshot("after_navigate")
         await asyncio.sleep(5)
 
-        # Проверяем капчу
-        page_text = await self._page.evaluate("() => (document.body.innerText || '').substring(0, 500)")
-        if any(w in page_text.lower() for w in ["captcha", "smartcaptcha", "robot"]):
-            raise RuntimeError("Yandex SmartCaptcha detected — cannot proceed")
+        # Проверяем капчу — retry до 3 раз с паузой
+        for attempt in range(3):
+            page_text = await self._page.evaluate("() => (document.body.innerText || '').substring(0, 500)")
+            if not any(w in page_text.lower() for w in ["captcha", "smartcaptcha", "robot"]):
+                break
+            logger.warning("SmartCaptcha detected (attempt %d/3), waiting 30s...", attempt + 1)
+            if attempt == 2:
+                raise RuntimeError("Yandex SmartCaptcha — не удалось обойти после 3 попыток")
+            await asyncio.sleep(30)
+            await self._page.reload(wait_until="domcontentloaded", timeout=30000)
         logger.info("Page text: %s", page_text.replace("\n", " | ")[:200])
 
         # Ввод имени — через JS как в hh-recruiter-bot
