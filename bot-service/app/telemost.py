@@ -105,18 +105,16 @@ class TelemostSession:
             ),
         )
 
+        # Stealth — скрываем автоматизацию
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en'] });
+            window.chrome = { runtime: {} };
+        """)
+
         self._page = await context.new_page()
         self._page.on("close", lambda _: self._meeting_ended.set())
         self._page.on("console", lambda msg: logger.debug("BROWSER: %s", msg.text))
-
-        # Stealth — как в hh-recruiter-bot
-        await self._page.evaluate_on_new_document("""
-            () => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en'] });
-                window.chrome = { runtime: {} };
-            }
-        """)
 
         logger.info("Navigating to %s", self.meeting_url)
         await self._page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
