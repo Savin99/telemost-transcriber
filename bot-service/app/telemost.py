@@ -82,10 +82,13 @@ class TelemostSession:
             chrome_path = None
 
         user_id = os.getuid()
+        xdg_runtime = os.getenv("XDG_RUNTIME_DIR", f"/run/user/{user_id}")
         launch_env = {
             **os.environ,
             "DISPLAY": os.getenv("DISPLAY", ":99"),
-            "XDG_RUNTIME_DIR": os.getenv("XDG_RUNTIME_DIR", f"/run/user/{user_id}"),
+            "XDG_RUNTIME_DIR": xdg_runtime,
+            "PULSE_SERVER": f"unix:{xdg_runtime}/pulse/native",
+            "PULSE_COOKIE": f"{os.path.expanduser('~')}/.config/pulse/cookie",
         }
 
         self._browser = await self._playwright.chromium.launch(
@@ -132,8 +135,8 @@ class TelemostSession:
         await self._enter_name()
         await self._screenshot("after_enter_name")
 
-        # Отключить камеру на pre-join — через JS
-        await self._mute_camera_prejoin()
+        # Отключить камеру и микрофон на pre-join — через JS
+        await self._mute_devices_prejoin()
 
         # Нажать "Подключиться" — через JS .click()
         await self._click_join()
@@ -176,18 +179,24 @@ class TelemostSession:
         else:
             logger.warning("Could not find name input")
 
-    async def _mute_camera_prejoin(self):
-        """Отключить камеру на pre-join экране через JS."""
+    async def _mute_devices_prejoin(self):
+        """Отключить микрофон и камеру на pre-join экране через JS + data-testid."""
         await self._page.evaluate("""
             () => {
+                // Terra-clan data-testid selectors
+                const micBtn = document.querySelector('button[data-testid="turn-off-mic-button"]');
+                if (micBtn) micBtn.click();
+                const camBtn = document.querySelector('button[data-testid="turn-off-cam-button"]');
+                if (camBtn) camBtn.click();
+                // Fallback: aria-label
                 const btns = Array.from(document.querySelectorAll('button'));
                 btns.forEach(b => {
                     const label = (b.getAttribute('aria-label') || '').toLowerCase();
-                    if (label.includes('камер')) b.click();
+                    if (label.includes('камер') || label.includes('микрофон')) b.click();
                 });
             }
         """)
-        logger.info("Muted camera (pre-join) via JS")
+        logger.info("Muted mic+camera (pre-join) via JS")
 
     async def _click_join(self):
         """Нажать кнопку подключения через JS .click() — обходит overlay."""
