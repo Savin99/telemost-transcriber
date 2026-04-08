@@ -13,7 +13,10 @@ from googleapiclient.http import MediaIoBaseUpload
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+]
 
 GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "1jwDy7XAtvX327nf0MJWZHzFERBwkbjvR")
 GDRIVE_CLIENT_SECRET = os.getenv("GDRIVE_CLIENT_SECRET", "/app/credentials/client_secret.json")
