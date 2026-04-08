@@ -7,18 +7,18 @@ logger = logging.getLogger(__name__)
 
 
 class AudioCapture:
-    """Захват аудио встречи через PulseAudio default sink monitor + FFmpeg.
+    """Захват аудио встречи через PulseAudio parec + ffmpeg конвертация.
 
-    Подход из terra-clan/AI_meet_assistant:
-    - FFmpeg пишет из virtual_output.monitor (default sink)
-    - Не нужно перенаправлять sink-inputs
-    - Chrome автоматически выводит звук в default sink
+    FFmpeg не может читать из PulseAudio monitor (выдаёт тишину).
+    parec работает корректно. Записываем raw PCM через parec,
+    потом конвертируем в WAV.
     """
 
     def __init__(self, output_path: str, session_id: str = "default"):
         self.output_path = output_path
         self.session_id = session_id
-        self._ffmpeg_process: asyncio.subprocess.Process | None = None
+        self._parec_process: asyncio.subprocess.Process | None = None
+        self._raw_path: str = output_path + ".raw"
         self._start_time: float | None = None
 
     @property
@@ -28,13 +28,12 @@ class AudioCapture:
         return time.time() - self._start_time
 
     async def start(self, page=None):
-        """Запуск записи аудио через FFmpeg из PulseAudio monitor."""
+        """Запуск записи аудио через parec."""
         self._start_time = time.time()
-        await self._start_ffmpeg()
+        await self._start_parec()
 
-    async def _start_ffmpeg(self):
-        """Запустить FFmpeg для записи из PulseAudio default sink monitor."""
-        # Используем virtual_output.monitor — default sink, настроенный в entrypoint.sh
+    async def _start_parec(self):
+        """Запустить parec для записи из PulseAudio monitor."""
         monitor_source = os.getenv("PULSE_MONITOR", "virtual_output.monitor")
 
         user_id = os.getuid()
@@ -45,82 +44,75 @@ class AudioCapture:
             "DISPLAY": os.getenv("DISPLAY", ":99"),
             "XDG_RUNTIME_DIR": xdg_runtime,
         }
+        if "PULSE_SERVER" not in env:
+            env["PULSE_SERVER"] = f"unix:{xdg_runtime}/pulse/native"
 
         args = [
-            "ffmpeg", "-y", "-loglevel", "warning",
-            "-f", "pulse",
-            "-i", monitor_source,
-            "-ac", "1",
-            "-ar", "16000",
-            "-c:a", "pcm_s16le",
+            "parec",
+            f"--device={monitor_source}",
+            "--rate=16000",
+            "--channels=1",
+            "--format=s16le",
+            "--file-format=wav",
             self.output_path,
         ]
 
         try:
-            self._ffmpeg_process = await asyncio.create_subprocess_exec(
+            self._parec_process = await asyncio.create_subprocess_exec(
                 *args,
-                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
-            await asyncio.sleep(2)
-            if self._ffmpeg_process.returncode is not None:
-                stderr = await self._ffmpeg_process.stderr.read()
+            await asyncio.sleep(1)
+            if self._parec_process.returncode is not None:
+                stderr = await self._parec_process.stderr.read()
                 logger.error(
-                    "[%s] FFmpeg failed to start: %s",
+                    "[%s] parec failed to start: %s",
                     self.session_id, stderr.decode(),
                 )
-                self._ffmpeg_process = None
-                raise RuntimeError("FFmpeg failed to start — check PulseAudio")
+                self._parec_process = None
+                raise RuntimeError("parec failed to start — check PulseAudio")
             else:
                 logger.info(
-                    "[%s] FFmpeg recording started (pid=%d) -> %s",
-                    self.session_id, self._ffmpeg_process.pid, self.output_path,
+                    "[%s] parec recording started (pid=%d) -> %s",
+                    self.session_id, self._parec_process.pid, self.output_path,
                 )
         except RuntimeError:
             raise
         except Exception as e:
-            logger.error("[%s] FFmpeg start failed: %s", self.session_id, e)
+            logger.error("[%s] parec start failed: %s", self.session_id, e)
             raise
 
     async def stop(self) -> float | None:
         """Остановка записи. Возвращает длительность в секундах."""
         duration = self.duration_seconds
-        await self._stop_ffmpeg()
+        await self._stop_parec()
         self._start_time = None
         return duration
 
-    async def _stop_ffmpeg(self):
-        """Остановить FFmpeg."""
-        if self._ffmpeg_process is None:
+    async def _stop_parec(self):
+        """Остановить parec."""
+        if self._parec_process is None:
             return
 
-        logger.info("[%s] Stopping FFmpeg...", self.session_id)
+        logger.info("[%s] Stopping parec...", self.session_id)
 
-        # FFmpeg мог уже умереть (PulseAudio crash) — обрабатываем gracefully
-        if self._ffmpeg_process.returncode is not None:
-            logger.warning("[%s] FFmpeg already exited (code=%d)", self.session_id, self._ffmpeg_process.returncode)
-            self._ffmpeg_process = None
+        if self._parec_process.returncode is not None:
+            logger.warning(
+                "[%s] parec already exited (code=%d)",
+                self.session_id, self._parec_process.returncode,
+            )
+            self._parec_process = None
             return
 
+        # SIGTERM для graceful stop
+        self._parec_process.terminate()
         try:
-            if self._ffmpeg_process.stdin and not self._ffmpeg_process.stdin.is_closing():
-                self._ffmpeg_process.stdin.write(b"q")
-                await self._ffmpeg_process.stdin.drain()
-                self._ffmpeg_process.stdin.close()
-        except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError):
-            pass
-
-        try:
-            await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=5)
+            await asyncio.wait_for(self._parec_process.wait(), timeout=5)
         except asyncio.TimeoutError:
-            self._ffmpeg_process.terminate()
-            try:
-                await asyncio.wait_for(self._ffmpeg_process.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                self._ffmpeg_process.kill()
-                await self._ffmpeg_process.wait()
+            self._parec_process.kill()
+            await self._parec_process.wait()
 
-        self._ffmpeg_process = None
-        logger.info("[%s] FFmpeg stopped", self.session_id)
+        self._parec_process = None
+        logger.info("[%s] parec stopped", self.session_id)
