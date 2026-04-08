@@ -54,13 +54,16 @@ async def cmd_start(msg: Message):
 
 @dp.message(Command("rec"))
 async def cmd_rec(msg: Message, command: CommandObject):
-    """Подключиться к встрече по команде /rec <url>."""
+    """Подключиться к встрече: /rec <url> [кол-во спикеров]."""
     text = command.args or ""
     match = TELEMOST_RE.search(text)
     if not match:
-        await msg.answer("Укажи ссылку: <code>/rec https://telemost.yandex.ru/j/...</code>")
+        await msg.answer("Укажи ссылку: <code>/rec https://telemost.yandex.ru/j/...</code>\nМожно указать кол-во спикеров: <code>/rec ссылка 3</code>")
         return
-    await _join_meeting(msg, match.group(0))
+    # Парсим число спикеров после URL
+    remainder = text[match.end():].strip()
+    num_speakers = int(remainder) if remainder.isdigit() else None
+    await _join_meeting(msg, match.group(0), num_speakers=num_speakers)
 
 
 @dp.message(Command("stop"))
@@ -120,7 +123,7 @@ async def handle_meeting_url(msg: Message):
     await _join_meeting(msg, url)
 
 
-async def _join_meeting(msg: Message, url: str):
+async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None):
     """Подключить бота к встрече."""
     chat_id = msg.chat.id
 
@@ -132,11 +135,15 @@ async def _join_meeting(msg: Message, url: str):
 
     status_msg = await msg.answer(f"Подключаюсь к встрече...")
 
+    payload = {"meeting_url": url}
+    if num_speakers is not None:
+        payload["num_speakers"] = num_speakers
+
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.post(
                 f"{BOT_API}/join",
-                json={"meeting_url": url},
+                json=payload,
             )
             resp.raise_for_status()
             data = resp.json()

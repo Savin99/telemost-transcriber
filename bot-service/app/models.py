@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class JoinRequest(BaseModel):
     meeting_url: str
     bot_name: str = "Транскрибатор"
+    num_speakers: Optional[int] = None
 
 
 class MeetingStatus(BaseModel):

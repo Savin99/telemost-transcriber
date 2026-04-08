@@ -28,6 +28,9 @@ app = FastAPI(title="Transcriber Service", lifespan=lifespan)
 
 class TranscribeRequest(BaseModel):
     audio_path: str
+    num_speakers: int | None = None
+    min_speakers: int | None = None
+    max_speakers: int | None = None
 
 
 class SegmentResponse(BaseModel):
@@ -55,7 +58,12 @@ async def transcribe(request: TranscribeRequest):
         )
 
     try:
-        segments = pipeline.transcribe(request.audio_path)
+        segments = pipeline.transcribe(
+            request.audio_path,
+            num_speakers=request.num_speakers,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+        )
         return TranscribeResponse(
             segments=[
                 SegmentResponse(

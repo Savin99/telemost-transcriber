@@ -67,11 +67,17 @@ class TranscriberPipeline:
             )
         return self._diarize_model
 
-    def transcribe(self, audio_path: str) -> list[TranscribedSegment]:
+    def transcribe(
+        self,
+        audio_path: str,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[TranscribedSegment]:
         """Транскрипция + alignment + диаризация."""
         import whisperx
 
-        logger.info("Transcribing %s", audio_path)
+        logger.info("Transcribing %s (num_speakers=%s)", audio_path, num_speakers)
 
         # 1. Загрузка аудио
         audio = whisperx.load_audio(audio_path)
@@ -92,7 +98,12 @@ class TranscriberPipeline:
         diarize_pipeline = self.diarize_model
         if diarize_pipeline is not None:
             logger.info("Running diarization...")
-            diarize_segments = diarize_pipeline(audio)
+            diarize_segments = diarize_pipeline(
+                audio,
+                num_speakers=num_speakers,
+                min_speakers=min_speakers or num_speakers,
+                max_speakers=max_speakers or num_speakers,
+            )
             result = whisperx.assign_word_speakers(diarize_segments, result)
 
         # 5. Формирование результата

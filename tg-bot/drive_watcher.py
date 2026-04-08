@@ -102,12 +102,15 @@ def download_file(service, file_id: str, filename: str, dest_dir: Path) -> Path:
     return dest_path
 
 
-def transcribe_audio(audio_path: Path) -> list[dict]:
+def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> list[dict]:
     """Отправить аудио на WhisperX и получить сегменты."""
+    payload = {"audio_path": str(audio_path)}
+    if num_speakers is not None:
+        payload["num_speakers"] = num_speakers
     with httpx.Client(timeout=600) as client:
         response = client.post(
             f"{TRANSCRIBER_URL}/transcribe",
-            json={"audio_path": str(audio_path)},
+            json=payload,
         )
         response.raise_for_status()
         return response.json().get("segments", [])
@@ -143,11 +146,30 @@ def mark_as_processed(service, file_id: str):
     ).execute()
 
 
+def parse_num_speakers(filename: str) -> int | None:
+    """Извлечь количество спикеров из имени файла.
+
+    Ищет число в конце имени (перед расширением):
+        'встреча 3.webm' → 3
+        'запись_5.mp3' → 5
+        'встреча.webm' → None
+    """
+    import re
+    stem = Path(filename).stem
+    match = re.search(r'[\s_\-](\d+)$', stem)
+    if match:
+        n = int(match.group(1))
+        if 1 <= n <= 20:
+            return n
+    return None
+
+
 def process_file(service, file_info: dict):
     """Обработать один аудиофайл: скачать → транскрибировать → загрузить MD."""
     file_id = file_info["id"]
     filename = file_info["name"]
-    logger.info("Processing: %s (%s)", filename, file_id)
+    num_speakers = parse_num_speakers(filename)
+    logger.info("Processing: %s (%s) speakers=%s", filename, file_id, num_speakers)
 
     work_dir = WORK_DIR / file_id
     try:
@@ -155,8 +177,8 @@ def process_file(service, file_info: dict):
         audio_path = download_file(service, file_id, filename, work_dir)
 
         # 2. Транскрибировать
-        logger.info("Transcribing %s...", filename)
-        segments = transcribe_audio(audio_path)
+        logger.info("Transcribing %s (speakers=%s)...", filename, num_speakers)
+        segments = transcribe_audio(audio_path, num_speakers=num_speakers)
 
         if not segments:
             logger.warning("No segments found for %s — empty audio?", filename)

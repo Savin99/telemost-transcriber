@@ -49,7 +49,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Telemost Bot", lifespan=lifespan)
 
 
-async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
+async def _bot_workflow(
+    meeting_id: str,
+    meeting_url: str,
+    bot_name: str,
+    num_speakers: int | None = None,
+):
     """Основной workflow бота: вход → запись → транскрипция."""
     async with async_session() as session:
         try:
@@ -87,7 +92,7 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
 
             # 6. Отправка на транскрипцию
             await update_meeting_status(session, meeting_id, "transcribing")
-            segments = await _transcribe(recording_path)
+            segments = await _transcribe(recording_path, num_speakers=num_speakers)
 
             # 7. Сохранение результатов
             for seg in segments:
@@ -115,12 +120,18 @@ async def _bot_workflow(meeting_id: str, meeting_url: str, bot_name: str):
             active_sessions.pop(meeting_id, None)
 
 
-async def _transcribe(recording_path: str) -> list[dict]:
+async def _transcribe(
+    recording_path: str,
+    num_speakers: int | None = None,
+) -> list[dict]:
     """Отправить запись на транскрипцию."""
+    payload = {"audio_path": recording_path}
+    if num_speakers is not None:
+        payload["num_speakers"] = num_speakers
     async with httpx.AsyncClient(timeout=600) as client:
         response = await client.post(
             f"{TRANSCRIBER_URL}/transcribe",
-            json={"audio_path": recording_path},
+            json=payload,
         )
         response.raise_for_status()
         return response.json()["segments"]
@@ -159,7 +170,7 @@ async def join_meeting(
 
     # Запуск workflow в фоне
     task = asyncio.create_task(
-        _bot_workflow(meeting_id, request.meeting_url, request.bot_name)
+        _bot_workflow(meeting_id, request.meeting_url, request.bot_name, request.num_speakers)
     )
     if meeting_id in active_sessions:
         active_sessions[meeting_id]["task"] = task
