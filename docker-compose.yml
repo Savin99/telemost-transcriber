@@ -22,6 +22,10 @@ services:
       - "8001:8001"
     environment:
       HF_TOKEN: ${HF_TOKEN}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1}
+      CLUSTERING_THRESHOLD: ${CLUSTERING_THRESHOLD:-0.35}
+      CLUSTERING_FA: ${CLUSTERING_FA:-0.04}
+      CLUSTERING_FB: ${CLUSTERING_FB:-0.9}
     volumes:
       - recordings:/app/recordings
       - models:/root/.cache

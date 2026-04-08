@@ -60,11 +60,45 @@ class TranscriberPipeline:
             if not hf_token:
                 return None
             from whisperx.diarize import DiarizationPipeline
+
+            model_name = os.getenv(
+                "DIARIZATION_MODEL",
+                "pyannote/speaker-diarization-community-1",
+            )
             self._diarize_model = DiarizationPipeline(
-                model_name="pyannote/speaker-diarization-3.1",
+                model_name=model_name,
                 token=hf_token,
                 device=self.device,
             )
+
+            # Тюнинг параметров кластеризации для лучшего разделения похожих голосов
+            threshold = float(os.getenv("CLUSTERING_THRESHOLD", "0.35"))
+            if "community" in model_name:
+                # VBx-кластеризация (community-1)
+                params = {
+                    "clustering": {
+                        "threshold": threshold,
+                        "Fa": float(os.getenv("CLUSTERING_FA", "0.04")),
+                        "Fb": float(os.getenv("CLUSTERING_FB", "0.9")),
+                    },
+                    "segmentation": {"min_duration_off": 0.0},
+                }
+            else:
+                # Агломеративная кластеризация (3.1)
+                params = {
+                    "clustering": {
+                        "method": "centroid",
+                        "min_cluster_size": int(os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")),
+                        "threshold": float(os.getenv("CLUSTERING_THRESHOLD", "0.55")),
+                    },
+                    "segmentation": {"min_duration_off": 0.0},
+                }
+
+            self._diarize_model.model.instantiate(params)
+            logger.info(
+                "Diarization model loaded: %s, params: %s", model_name, params,
+            )
+
         return self._diarize_model
 
     def transcribe(
@@ -101,14 +135,17 @@ class TranscriberPipeline:
                 "Running diarization (num=%s, min=%s, max=%s)...",
                 num_speakers, min_speakers, max_speakers,
             )
-            diarize_segments = diarize_pipeline(
+            diarize_segments, speaker_embeddings = diarize_pipeline(
                 audio,
                 num_speakers=num_speakers,
                 min_speakers=min_speakers or num_speakers,
                 max_speakers=max_speakers or num_speakers,
+                return_embeddings=True,
             )
             logger.info("Diarization found %d segments", len(diarize_segments))
-            result = whisperx.assign_word_speakers(diarize_segments, result)
+            result = whisperx.assign_word_speakers(
+                diarize_segments, result, speaker_embeddings=speaker_embeddings,
+            )
 
         # 5. Формирование результата
         segments = []

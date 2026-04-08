@@ -20,8 +20,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# WhisperX — транскрипция + alignment + диаризация в одном пакете
-RUN pip install --no-cache-dir whisperx
+# WhisperX из main — поддержка community-1 + pyannote 4.0
+RUN pip install --no-cache-dir "whisperx @ git+https://github.com/m-bain/whisperX.git"
 
 # FastAPI и зависимости
 COPY requirements.txt .
