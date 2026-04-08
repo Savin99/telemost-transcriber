@@ -40,9 +40,20 @@ def _get_credentials() -> Credentials | None:
 
 
 def authorize():
-    """Одноразовая авторизация — запустить вручную для получения токена."""
+    """Одноразовая авторизация — запустить вручную для получения токена.
+
+    На сервере без браузера используется консольный режим:
+    1. Покажет URL
+    2. Открой URL в браузере
+    3. Авторизуйся и скопируй код
+    4. Вставь код в консоль
+    """
     flow = InstalledAppFlow.from_client_secrets_file(GDRIVE_CLIENT_SECRET, SCOPES)
-    creds = flow.run_local_server(port=0)
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception:
+        # Fallback для серверов без браузера
+        creds = flow.run_console()
 
     os.makedirs(os.path.dirname(GDRIVE_TOKEN_PATH), exist_ok=True)
     with open(GDRIVE_TOKEN_PATH, "w") as f:
