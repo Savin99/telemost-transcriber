@@ -32,7 +32,7 @@ bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML
 dp = Dispatcher()
 
 # Regex для ссылок Телемоста
-TELEMOST_RE = re.compile(r"https?://telemost\.yandex\.ru/j/\d+")
+TELEMOST_RE = re.compile(r"https?://telemost(?:\.360)?\.yandex\.ru/j/\d+")
 
 # Активные сессии: chat_id → {"meeting_id": str, "url": str}
 active: dict[int, dict] = {}
