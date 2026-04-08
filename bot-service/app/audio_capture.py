@@ -98,12 +98,18 @@ class AudioCapture:
 
         logger.info("[%s] Stopping FFmpeg...", self.session_id)
 
+        # FFmpeg мог уже умереть (PulseAudio crash) — обрабатываем gracefully
+        if self._ffmpeg_process.returncode is not None:
+            logger.warning("[%s] FFmpeg already exited (code=%d)", self.session_id, self._ffmpeg_process.returncode)
+            self._ffmpeg_process = None
+            return
+
         try:
-            if self._ffmpeg_process.stdin:
+            if self._ffmpeg_process.stdin and not self._ffmpeg_process.stdin.is_closing():
                 self._ffmpeg_process.stdin.write(b"q")
                 await self._ffmpeg_process.stdin.drain()
                 self._ffmpeg_process.stdin.close()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError):
             pass
 
         try:
