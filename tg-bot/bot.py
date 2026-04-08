@@ -19,6 +19,8 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message
 
+from gdrive import upload_transcript_md
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,11 @@ async def _send_transcript(chat_id: int, transcript: dict):
             filename="transcript.txt",
         )
         await bot.send_document(chat_id, file)
+
+    # Сохранить MD на Google Drive
+    gdrive_link = upload_transcript_md(transcript)
+    if gdrive_link:
+        await bot.send_message(chat_id, f"📁 <a href=\"{gdrive_link}\">Транскрипт на Google Drive</a>")
 
 
 async def main():
