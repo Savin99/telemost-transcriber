@@ -1,0 +1,229 @@
+import sys
+import tempfile
+import types
+import unittest
+import wave
+from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.audio_utils import DEFAULT_SAMPLE_RATE, l2_normalize
+from app.speaker_identifier import SpeakerIdentifier
+from app.transcribe import TranscriberPipeline
+
+
+def _write_test_wav(path: Path, duration_seconds: float = 3.0):
+    sample_count = int(DEFAULT_SAMPLE_RATE * duration_seconds)
+    samples = np.sin(np.linspace(0.0, 4.0 * np.pi, sample_count)).astype(np.float32) * 0.1
+    pcm = np.clip(samples * 32767.0, -32768, 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(DEFAULT_SAMPLE_RATE)
+        wav_file.writeframes(pcm.tobytes())
+
+
+class FakeAsrModel:
+    def __init__(self, segments):
+        self.segments = segments
+
+    def transcribe(self, audio, batch_size=16):
+        return {"segments": [dict(segment) for segment in self.segments]}
+
+
+class FakeDiarizePipeline:
+    def __init__(self, diarization_segments, speaker_embeddings=None):
+        self.diarization_segments = diarization_segments
+        self.speaker_embeddings = speaker_embeddings
+
+    def __call__(
+        self,
+        audio,
+        num_speakers=None,
+        min_speakers=None,
+        max_speakers=None,
+        return_embeddings=True,
+    ):
+        return ([dict(segment) for segment in self.diarization_segments], self.speaker_embeddings)
+
+
+class FakeIdentifier:
+    def __init__(self, embeddings):
+        self.embeddings = [l2_normalize(np.asarray(item, dtype=np.float32)) for item in embeddings]
+        self.calls = 0
+        self._matcher = SpeakerIdentifier(device="cpu")
+
+    def extract_embedding(self, waveform, sample_rate):
+        self.calls += 1
+        if not self.embeddings:
+            raise AssertionError("Embedding queue exhausted")
+        return self.embeddings.pop(0)
+
+    def identify_speakers(self, cluster_embeddings, voice_bank, threshold=0.40):
+        return self._matcher.identify_speakers(
+            cluster_embeddings=cluster_embeddings,
+            voice_bank=voice_bank,
+            threshold=threshold,
+        )
+
+
+class FakeVoiceBank:
+    def __init__(self, centroids):
+        self.centroids = centroids
+        self.saved_bundles = []
+
+    def get_all_centroids(self):
+        return self.centroids
+
+    def save_meeting_bundle(self, **kwargs):
+        self.saved_bundles.append(kwargs)
+        return Path("/tmp/fake-bundle")
+
+    def meeting_key_for(self, audio_path: str) -> str:
+        return "fake-meeting"
+
+
+def _fake_whisperx_module():
+    def load_audio(path):
+        return {"path": path}
+
+    def load_align_model(language_code, device):
+        return object(), {"language_code": language_code, "device": device}
+
+    def align(segments, model_a, metadata, audio, device):
+        return {"segments": [dict(segment) for segment in segments]}
+
+    def assign_word_speakers(diarize_segments, result, speaker_embeddings=None):
+        assigned_segments = []
+        for segment in result["segments"]:
+            assigned = dict(segment)
+            assigned["speaker"] = None
+            for diarized in diarize_segments:
+                if diarized["start"] <= segment["start"] < diarized["end"]:
+                    assigned["speaker"] = diarized["speaker"]
+                    break
+            assigned_segments.append(assigned)
+        return {"segments": assigned_segments}
+
+    return types.SimpleNamespace(
+        load_audio=load_audio,
+        load_align_model=load_align_model,
+        align=align,
+        assign_word_speakers=assign_word_speakers,
+    )
+
+
+class TranscriberPipelineTests(unittest.TestCase):
+    def _make_pipeline(
+        self,
+        asr_segments,
+        diarization_segments,
+        identifier_embeddings,
+        centroids,
+        speaker_embeddings=None,
+    ):
+        pipeline = TranscriberPipeline(device="cpu")
+        pipeline._asr_model = FakeAsrModel(asr_segments)
+        pipeline._diarize_model = FakeDiarizePipeline(diarization_segments, speaker_embeddings)
+        pipeline._speaker_identifier = FakeIdentifier(identifier_embeddings)
+        pipeline._voice_bank = FakeVoiceBank(centroids)
+        return pipeline
+
+    def test_manual_extraction_is_used_for_community_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 1.2, "text": "Привет"},
+                    {"start": 1.2, "end": 2.4, "text": "Пока"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    {"start": 1.2, "end": 2.4, "speaker": "SPEAKER_01"},
+                ],
+                identifier_embeddings=[
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ],
+                centroids={
+                    "Alice": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                },
+                speaker_embeddings={
+                    "SPEAKER_00": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                    "SPEAKER_01": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                },
+            )
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
+                    segments = pipeline.transcribe(str(audio_path))
+
+            self.assertEqual([segment.speaker for segment in segments], ["Alice", "Unknown Speaker 1"])
+            self.assertEqual(pipeline.speaker_identifier.calls, 2)
+            self.assertEqual(len(pipeline.voice_bank.saved_bundles), 1)
+
+    def test_empty_voice_bank_leaves_all_unknown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 1.4, "text": "Раз"},
+                    {"start": 1.4, "end": 2.8, "text": "Два"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.4, "speaker": "SPEAKER_00"},
+                    {"start": 1.4, "end": 2.8, "speaker": "SPEAKER_01"},
+                ],
+                identifier_embeddings=[
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                ],
+                centroids={},
+            )
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
+                    segments = pipeline.transcribe(str(audio_path))
+
+            self.assertEqual(
+                [segment.speaker for segment in segments],
+                ["Unknown Speaker 1", "Unknown Speaker 2"],
+            )
+
+    def test_short_segments_without_embeddings_still_get_unknown_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path, duration_seconds=1.0)
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 0.4, "text": "Коротко"},
+                    {"start": 0.4, "end": 0.8, "text": "Ещё"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 0.4, "speaker": "SPEAKER_00"},
+                    {"start": 0.4, "end": 0.8, "speaker": "SPEAKER_01"},
+                ],
+                identifier_embeddings=[],
+                centroids={},
+            )
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
+                    segments = pipeline.transcribe(str(audio_path))
+
+            self.assertEqual(
+                [segment.speaker for segment in segments],
+                ["Unknown Speaker 1", "Unknown Speaker 2"],
+            )
+            self.assertEqual(pipeline.speaker_identifier.calls, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

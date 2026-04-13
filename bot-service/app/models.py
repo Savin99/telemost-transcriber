@@ -32,6 +32,47 @@ class TranscriptResponse(BaseModel):
     segments: list[TranscriptSegment]
 
 
+class SpeakerReviewRequest(BaseModel):
+    num_speakers: Optional[int] = None
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
+    samples_per_speaker: int = 3
+    sample_max_seconds: float = 12.0
+
+
+class SpeakerSegmentPreview(BaseModel):
+    start: float
+    end: float
+
+
+class SpeakerReviewItem(BaseModel):
+    speaker_label: str
+    current_name: str
+    confidence: float
+    is_known: bool
+    segments: list[SpeakerSegmentPreview]
+    sample_count: int
+
+
+class SpeakerReviewResponse(BaseModel):
+    meeting_id: str
+    meeting_key: str
+    items: list[SpeakerReviewItem]
+
+
+class SpeakerLabelRequest(BaseModel):
+    name: str
+    alpha: float = 0.05
+
+
+class SpeakerLabelResponse(BaseModel):
+    meeting_id: str
+    meeting_key: str
+    speaker_label: str
+    previous_name: str
+    name: str
+
+
 class HealthResponse(BaseModel):
     status: str
     active_bots: int

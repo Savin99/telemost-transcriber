@@ -82,7 +82,7 @@ restart_bot() {
 
 restart_transcriber() {
     log "Рестарт transcriber-service..."
-    $VAST_SSH "pkill -f 'uvicorn app.main:app.*8001' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/transcriber-service && source /venv/main/bin/activate 2>/dev/null || true && HF_TOKEN=\$HF_TOKEN DIARIZATION_MODEL=\${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1} CLUSTERING_THRESHOLD=\${CLUSTERING_THRESHOLD:-0.35} CLUSTERING_FA=\${CLUSTERING_FA:-0.04} CLUSTERING_FB=\${CLUSTERING_FB:-0.9} nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > $REMOTE_LOGS/transcriber.log 2>&1 & echo 'transcriber-service PID: '\$!" 2>/dev/null
+    $VAST_SSH "mkdir -p /workspace/voice_bank; pkill -f 'uvicorn app.main:app.*8001' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/transcriber-service && source /venv/main/bin/activate 2>/dev/null || true && HF_TOKEN=\$HF_TOKEN DIARIZATION_MODEL=\${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1} CLUSTERING_THRESHOLD=\${CLUSTERING_THRESHOLD:-0.35} CLUSTERING_FA=\${CLUSTERING_FA:-0.04} CLUSTERING_FB=\${CLUSTERING_FB:-0.9} VOICE_BANK_DIR=\${VOICE_BANK_DIR:-/workspace/voice_bank} VOICE_MATCH_THRESHOLD=\${VOICE_MATCH_THRESHOLD:-0.40} MIN_EMBEDDING_SEGMENT_SEC=\${MIN_EMBEDDING_SEGMENT_SEC:-1.0} nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > $REMOTE_LOGS/transcriber.log 2>&1 & echo 'transcriber-service PID: '\$!" 2>/dev/null
 }
 
 case "$TARGET" in

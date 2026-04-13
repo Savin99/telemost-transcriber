@@ -1,3 +1,5 @@
 fastapi==0.115.*
 uvicorn[standard]==0.34.*
 pydantic==2.11.*
+numpy>=1.26,<3
+scikit-learn>=1.4,<2

@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Директория для записей (shared volume)
-RUN mkdir -p /app/recordings
+RUN mkdir -p /app/recordings /app/voice_bank
 
 EXPOSE 8001
 

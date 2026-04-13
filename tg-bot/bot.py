@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 TG_TOKEN = os.environ["TG_BOT_TOKEN"]
 BOT_API = os.getenv("BOT_API_URL", "http://localhost:8000")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+VOICE_REVIEW_SAMPLE_COUNT = int(os.getenv("VOICE_REVIEW_SAMPLE_COUNT", "2"))
+VOICE_REVIEW_SAMPLE_MAX_SECONDS = float(os.getenv("VOICE_REVIEW_SAMPLE_MAX_SECONDS", "10"))
 
 bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -36,6 +39,11 @@ TELEMOST_RE = re.compile(r"https?://telemost(?:\.360)?\.yandex\.ru/j/\d+")
 
 # Активные сессии: chat_id → {"meeting_id": str, "url": str}
 active: dict[int, dict] = {}
+pending_reviews: dict[int, dict] = {}
+
+
+def _safe_html(value: object) -> str:
+    return html.escape(str(value), quote=False)
 
 
 @dp.message(Command("start", "help"))
@@ -48,6 +56,8 @@ async def cmd_start(msg: Message):
         "<b>Команды:</b>\n"
         "/stop — остановить запись и получить транскрипт\n"
         "/status — статус текущей записи\n\n"
+        "После транскрипта могу прислать примеры аудио для неизвестных голосов, "
+        "и ты просто ответишь именем.\n\n"
         "Работаю и в группах — просто добавь меня и кидайте ссылки."
     )
 
@@ -81,7 +91,7 @@ async def cmd_stop(msg: Message):
             resp = await client.post(f"{BOT_API}/leave/{meeting_id}")
             resp.raise_for_status()
         except Exception as e:
-            await status_msg.edit_text(f"Ошибка: {e}")
+            await status_msg.edit_text(f"Ошибка: {_safe_html(e)}")
             return
 
     await status_msg.edit_text("Запись остановлена. Транскрибирую... ⏳")
@@ -111,9 +121,80 @@ async def cmd_status(msg: Message):
             if duration:
                 m, s = divmod(int(duration), 60)
                 dur_str = f" ({m}:{s:02d})"
-            await msg.answer(f"Статус: <b>{status}</b>{dur_str}")
+            await msg.answer(f"Статус: <b>{_safe_html(status)}</b>{dur_str}")
         except Exception as e:
-            await msg.answer(f"Ошибка: {e}")
+            await msg.answer(f"Ошибка: {_safe_html(e)}")
+
+
+@dp.message(Command("skipvoice"))
+async def cmd_skipvoice(msg: Message):
+    state = pending_reviews.get(msg.chat.id)
+    if not state or not state.get("current"):
+        await msg.answer("Сейчас нет активного вопроса по новому голосу.")
+        return
+
+    skipped = state["current"]["current_name"]
+    await msg.answer(f"Ок, пропускаю {_safe_html(skipped)}.")
+    state["current"] = None
+    await _send_next_review_item(msg.chat.id)
+
+
+@dp.message(Command("stopvoices"))
+async def cmd_stopvoices(msg: Message):
+    if msg.chat.id in pending_reviews:
+        pending_reviews.pop(msg.chat.id, None)
+        await msg.answer("Остановил разметку новых голосов.")
+        return
+    await msg.answer("Сейчас нет активной разметки голосов.")
+
+
+def _is_pending_voice_label_message(message: Message) -> bool:
+    text = (message.text or "").strip()
+    return (
+        message.chat.id in pending_reviews
+        and bool(text)
+        and not text.startswith("/")
+        and not TELEMOST_RE.search(text)
+    )
+
+
+@dp.message(_is_pending_voice_label_message)
+async def handle_pending_voice_label(msg: Message):
+    state = pending_reviews.get(msg.chat.id)
+    if not state:
+        return
+
+    text = (msg.text or "").strip()
+    if not text:
+        return
+    if text.startswith("/"):
+        return
+    if TELEMOST_RE.search(text):
+        return
+
+    current = state.get("current")
+    if not current:
+        return
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            response = await client.post(
+                f"{BOT_API}/meetings/{state['meeting_id']}/speaker-review/"
+                f"{state['meeting_key']}/{current['speaker_label']}/label",
+                json={"name": text},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            await msg.answer(f"Не удалось сохранить голос: {_safe_html(e)}")
+            return
+
+    await msg.answer(
+        f"Запомнил: <b>{_safe_html(data['name'])}</b>. "
+        f"В этой встрече тоже переименовал { _safe_html(data['previous_name']) }."
+    )
+    state["current"] = None
+    await _send_next_review_item(msg.chat.id)
 
 
 @dp.message(F.text.regexp(TELEMOST_RE))
@@ -149,7 +230,7 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
             data = resp.json()
             meeting_id = data["meeting_id"]
         except Exception as e:
-            await status_msg.edit_text(f"Не удалось подключиться: {e}")
+            await status_msg.edit_text(f"Не удалось подключиться: {_safe_html(e)}")
             return
 
     active[chat_id] = {"meeting_id": meeting_id, "url": url}
@@ -188,12 +269,14 @@ async def _auto_wait(chat_id: int, meeting_id: str):
                     resp = await client.get(f"{BOT_API}/transcripts/{meeting_id}")
                     await _send_transcript(chat_id, resp.json())
                 except Exception as e:
-                    await bot.send_message(chat_id, f"Транскрипт готов, но ошибка: {e}")
+                    await bot.send_message(
+                        chat_id, f"Транскрипт готов, но ошибка: {_safe_html(e)}"
+                    )
                 return
 
             if status == "error":
                 active.pop(chat_id, None)
-                error_msg = data.get("error_message", "Неизвестная ошибка")
+                error_msg = _safe_html(data.get("error_message", "Неизвестная ошибка"))
                 await bot.send_message(chat_id, f"Ошибка записи: {error_msg}")
                 return
 
@@ -219,6 +302,128 @@ async def _wait_and_get_transcript(meeting_id: str) -> dict | None:
     return None
 
 
+def _format_time(seconds: float) -> str:
+    total_seconds = int(seconds)
+    minutes, seconds_part = divmod(total_seconds, 60)
+    hours, minutes_part = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes_part:02d}:{seconds_part:02d}"
+    return f"{minutes_part}:{seconds_part:02d}"
+
+
+def _format_segment_preview(segments: list[dict]) -> str:
+    if not segments:
+        return "без подходящих сегментов"
+    parts = []
+    for segment in segments[:3]:
+        parts.append(f"{_format_time(float(segment['start']))}-{_format_time(float(segment['end']))}")
+    if len(segments) > 3:
+        parts.append("...")
+    return ", ".join(parts)
+
+
+async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
+    meeting_id = transcript.get("meeting_id")
+    if not meeting_id:
+        return
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        try:
+            response = await client.post(
+                f"{BOT_API}/meetings/{meeting_id}/speaker-review",
+                json={
+                    "samples_per_speaker": VOICE_REVIEW_SAMPLE_COUNT,
+                    "sample_max_seconds": VOICE_REVIEW_SAMPLE_MAX_SECONDS,
+                },
+            )
+            response.raise_for_status()
+            review = response.json()
+        except Exception as e:
+            logger.warning("Could not start speaker review for %s: %s", meeting_id, e)
+            return
+
+    unknown_items = [
+        item
+        for item in review.get("items", [])
+        if not item.get("is_known")
+    ]
+    if not unknown_items:
+        return
+
+    if chat_id in pending_reviews:
+        pending_reviews.pop(chat_id, None)
+
+    pending_reviews[chat_id] = {
+        "meeting_id": meeting_id,
+        "meeting_key": review["meeting_key"],
+        "queue": unknown_items,
+        "current": None,
+    }
+    await bot.send_message(
+        chat_id,
+        "Я нашёл новые или неизвестные голоса. Сейчас пришлю короткие примеры, "
+        "а ты просто ответь именем сообщением.\n\n"
+        "Команды:\n"
+        "/skipvoice — пропустить текущий голос\n"
+        "/stopvoices — закончить разметку",
+    )
+    await _send_next_review_item(chat_id)
+
+
+async def _send_next_review_item(chat_id: int):
+    state = pending_reviews.get(chat_id)
+    if not state:
+        return
+
+    if state.get("current") is None:
+        queue = state.get("queue", [])
+        if not queue:
+            pending_reviews.pop(chat_id, None)
+            await bot.send_message(chat_id, "Разметка новых голосов завершена.")
+            return
+        state["current"] = queue.pop(0)
+
+    current = state["current"]
+    speaker_label = current["speaker_label"]
+    sample_count = int(current.get("sample_count", 0))
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        for sample_index in range(sample_count):
+            try:
+                response = await client.get(
+                    f"{BOT_API}/meetings/{state['meeting_id']}/speaker-review/"
+                    f"{state['meeting_key']}/{speaker_label}/samples/{sample_index}"
+                )
+                response.raise_for_status()
+            except Exception as e:
+                logger.warning(
+                    "Could not fetch speaker sample %s/%s for %s: %s",
+                    sample_index,
+                    sample_count,
+                    speaker_label,
+                    e,
+                )
+                continue
+
+            audio_file = BufferedInputFile(
+                response.content,
+                filename=f"{speaker_label}_{sample_index}.wav",
+            )
+            await bot.send_audio(
+                chat_id,
+                audio=audio_file,
+                title=f"{speaker_label} sample {sample_index + 1}",
+            )
+
+    await bot.send_message(
+        chat_id,
+        "Кто это?\n"
+        f"Текущая метка: <b>{_safe_html(current['current_name'])}</b>\n"
+        f"Таймкоды: {_safe_html(_format_segment_preview(current.get('segments', [])))}\n\n"
+        "Просто ответь именем одним сообщением.",
+    )
+
+
 async def _send_transcript(chat_id: int, transcript: dict):
     """Отформатировать и отправить транскрипт."""
     segments = transcript.get("segments", [])
@@ -233,33 +438,37 @@ async def _send_transcript(chat_id: int, transcript: dict):
         dur_str = f"Длительность: {m}:{s:02d}\n"
 
     # Форматирование
-    lines = []
+    html_lines = []
+    plain_lines = []
     current_speaker = None
     for seg in segments:
-        speaker = seg.get("speaker") or "?"
+        speaker = str(seg.get("speaker") or "?")
+        speaker_html = _safe_html(speaker)
         start = seg["start"]
-        text = seg["text"]
+        text_raw = str(seg.get("text", ""))
+        text_html = _safe_html(text_raw)
         m, s = divmod(int(start), 60)
         ts = f"{m}:{s:02d}"
 
         if speaker != current_speaker:
             current_speaker = speaker
-            lines.append(f"\n<b>{speaker}</b> [{ts}]:")
-        lines.append(text)
+            html_lines.append(f"\n<b>{speaker_html}</b> [{ts}]:")
+            plain_lines.append(f"\n{speaker} [{ts}]:")
+        html_lines.append(text_html)
+        plain_lines.append(text_raw)
 
-    full_text = "\n".join(lines).strip()
+    full_text_html = "\n".join(html_lines).strip()
+    full_text_plain = "\n".join(plain_lines).strip()
     header = f"📝 <b>Транскрипт встречи</b>\n{dur_str}\n"
 
-    message = header + full_text
+    message = header + full_text_html
     if len(message) <= 4096:
         await bot.send_message(chat_id, message)
     else:
         # Отправить короткую сводку + файл
         await bot.send_message(chat_id, header + f"Сегментов: {len(segments)}. Отправляю файлом...")
-        # Убираем HTML-теги для txt-файла
-        plain = full_text.replace("<b>", "").replace("</b>", "")
         file = BufferedInputFile(
-            plain.encode("utf-8"),
+            full_text_plain.encode("utf-8"),
             filename="transcript.txt",
         )
         await bot.send_document(chat_id, file)
@@ -267,7 +476,12 @@ async def _send_transcript(chat_id: int, transcript: dict):
     # Сохранить MD на Google Drive
     gdrive_link = upload_transcript_md(transcript)
     if gdrive_link:
-        await bot.send_message(chat_id, f"📁 <a href=\"{gdrive_link}\">Транскрипт на Google Drive</a>")
+        safe_link = html.escape(gdrive_link, quote=True)
+        await bot.send_message(
+            chat_id, f"📁 <a href=\"{safe_link}\">Транскрипт на Google Drive</a>"
+        )
+
+    await _maybe_start_speaker_review(chat_id, transcript)
 
 
 async def main():

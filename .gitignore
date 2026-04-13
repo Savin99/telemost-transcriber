@@ -9,5 +9,6 @@
 __pycache__/
 *.pyc
 recordings/
+voice_bank/
 test_*.py
 whisper_transcript.json
