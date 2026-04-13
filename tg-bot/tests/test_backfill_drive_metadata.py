@@ -7,6 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backfill_drive_metadata import (  # noqa: E402
+    extract_date_from_filename,
     rebuild_filename_with_original_date,
     parse_markdown_transcript,
     rewrite_markdown_title,
@@ -60,8 +61,35 @@ class BackfillDriveMetadataTests(unittest.TestCase):
         )
         transcript = {"meeting_date": "2026-04-07"}
         self.assertEqual(
-            rebuild_filename_with_original_date(metadata, transcript),
+            rebuild_filename_with_original_date(
+                metadata,
+                transcript,
+                source_filename="transcript.md",
+            ),
             "harness-егор-в-и-илья-с_2026-04-07.md",
+        )
+
+    def test_rebuild_filename_prefers_date_from_source_filename(self):
+        metadata = MeetingMetadata(
+            title="Harness - Егор В. и Илья С.",
+            folder_path=["Projects", "Harness"],
+            filename="harness-2026-04-13.md",
+            source="rule",
+        )
+        transcript = {"meeting_date": "2026-04-13"}
+        self.assertEqual(
+            rebuild_filename_with_original_date(
+                metadata,
+                transcript,
+                source_filename="Запись встречи 07.04.2026 13-26-45 - запись 3_transcript.md",
+            ),
+            "harness-егор-в-и-илья-с_2026-04-07.md",
+        )
+
+    def test_extract_date_from_filename_supports_short_russian_dates(self):
+        self.assertEqual(
+            extract_date_from_filename("Встреча в Телемосте 08.04.26 11-33-51 — запись_transcript.md"),
+            "2026-04-08",
         )
 
 

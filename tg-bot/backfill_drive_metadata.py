@@ -157,7 +157,27 @@ def rewrite_markdown_title(content: str, title: str) -> str:
     return rewritten
 
 
-def rebuild_filename_with_original_date(metadata, transcript: dict) -> str:
+def extract_date_from_filename(filename: str) -> str:
+    patterns = (
+        re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})\b"),
+        re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{4})\b"),
+        re.compile(r"\b(?P<day>\d{2})\.(?P<month>\d{2})\.(?P<year>\d{2})\b"),
+    )
+    for pattern in patterns:
+        match = pattern.search(filename)
+        if not match:
+            continue
+        year = match.group("year")
+        if len(year) == 2:
+            year = f"20{year}"
+        return f"{year}-{match.group('month')}-{match.group('day')}"
+    return ""
+
+
+def rebuild_filename_with_original_date(metadata, transcript: dict, source_filename: str) -> str:
+    filename_date = extract_date_from_filename(source_filename)
+    if filename_date:
+        return f"{slugify_filename_stem(metadata.title)}_{filename_date}.md"
     meeting_date = str(transcript.get("meeting_date") or "").strip()
     if not meeting_date:
         return metadata.filename
@@ -255,7 +275,11 @@ def process_markdown_file(
         transcript=transcript,
         source_filename=file_info.name,
     )
-    target_name = rebuild_filename_with_original_date(metadata, transcript)
+    target_name = rebuild_filename_with_original_date(
+        metadata,
+        transcript,
+        source_filename=file_info.name,
+    )
     updated_markdown = rewrite_markdown_title(markdown, metadata.title)
 
     action_bits = [
