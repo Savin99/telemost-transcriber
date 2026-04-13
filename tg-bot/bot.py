@@ -239,6 +239,17 @@ async def handle_pending_voice_label(msg: Message):
         f"Запомнил: <b>{_safe_html(data['name'])}</b>. "
         f"В этой встрече тоже переименовал { _safe_html(data['previous_name']) }."
     )
+    merged_labels = data.get("merged_labels", [])
+    if merged_labels:
+        merged_speaker_labels = {item["speaker_label"] for item in merged_labels}
+        state["queue"] = [
+            item
+            for item in state.get("queue", [])
+            if item.get("speaker_label") not in merged_speaker_labels
+        ]
+        await msg.answer(
+            f"И ещё автоматически склеил похожих кластеров: {len(merged_labels)}."
+        )
     state["current"] = None
     await _send_next_review_item(msg.chat.id)
 
@@ -493,7 +504,8 @@ async def _send_next_review_item(chat_id: int):
         "Кто это?\n"
         f"Текущая метка: <b>{_safe_html(current['current_name'])}</b>\n"
         f"Таймкоды: {_safe_html(_format_segment_preview(current.get('segments', [])))}\n\n"
-        "Просто ответь именем одним сообщением.",
+        "Просто ответь именем одним сообщением.\n"
+        "Если это тот же человек, напиши то же самое имя без слов вроде \"тоже\".",
     )
 
 

@@ -79,11 +79,19 @@ class SpeakerLabelRequest(BaseModel):
     alpha: float = 0.05
 
 
+class SpeakerMergedLabelResponse(BaseModel):
+    speaker_label: str
+    previous_name: str
+    name: str
+    confidence: float
+
+
 class SpeakerLabelResponse(BaseModel):
     meeting_key: str
     speaker_label: str
     previous_name: str
     name: str
+    merged_labels: list[SpeakerMergedLabelResponse] = []
 
 
 @app.post("/transcribe", response_model=TranscribeResponse)
@@ -232,6 +240,15 @@ async def speaker_review_label(
             speaker_label=result["speaker_label"],
             previous_name=result["previous_name"],
             name=result["name"],
+            merged_labels=[
+                SpeakerMergedLabelResponse(
+                    speaker_label=item["speaker_label"],
+                    previous_name=item["previous_name"],
+                    name=item["name"],
+                    confidence=float(item["confidence"]),
+                )
+                for item in result.get("merged_labels", [])
+            ],
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

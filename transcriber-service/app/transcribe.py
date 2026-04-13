@@ -18,6 +18,41 @@ from .voice_bank import VoiceBank
 logger = logging.getLogger(__name__)
 
 
+REVIEW_NAME_PREFIXES = (
+    "это тоже ",
+    "это ",
+    "тоже ",
+    "тот же ",
+    "та же ",
+    "same ",
+    "also ",
+)
+
+
+def normalize_review_speaker_name(name: str) -> str:
+    normalized = " ".join(str(name).strip().split())
+    if not normalized:
+        raise ValueError("Speaker name cannot be empty")
+
+    candidate = normalized
+    changed = True
+    while changed:
+        changed = False
+        lowered = candidate.casefold()
+        for prefix in REVIEW_NAME_PREFIXES:
+            if lowered.startswith(prefix):
+                stripped = candidate[len(prefix):].strip(" \t-:,.!?")
+                if stripped:
+                    candidate = stripped
+                    changed = True
+                break
+
+    candidate = candidate.strip(" \t-:,.!?")
+    if not candidate:
+        raise ValueError("Speaker name cannot be empty")
+    return candidate
+
+
 @dataclass
 class TranscribedSegment:
     speaker: Optional[str]
@@ -224,8 +259,9 @@ class TranscriberPipeline:
         current_assignment = mapping.get(speaker_label)
         previous_name = current_assignment.name if current_assignment else speaker_label
         audio_path = str(bundle["audio_path"])
+        normalized_name = normalize_review_speaker_name(name)
         result = self.voice_bank.learn_from_diarization_label(
-            name=name,
+            name=normalized_name,
             audio_path=audio_path,
             diarization=bundle,
             speaker_label=speaker_label,
@@ -236,12 +272,18 @@ class TranscriberPipeline:
             speaker_label=speaker_label,
             result=result,
         )
+        merged_labels = self._auto_merge_review_clusters(
+            meeting_key=meeting_key,
+            labeled_speaker_label=speaker_label,
+            labeled_name=result.name,
+        )
         return {
             "meeting_key": meeting_key,
             "speaker_label": speaker_label,
             "previous_name": previous_name,
             "name": result.name,
             "audio_path": audio_path,
+            "merged_labels": merged_labels,
         }
 
     def transcribe(
@@ -432,6 +474,78 @@ class TranscriberPipeline:
             },
         )
         return cluster_profiles, mapping
+
+    def _auto_merge_review_clusters(
+        self,
+        meeting_key: str,
+        labeled_speaker_label: str,
+        labeled_name: str,
+    ) -> list[dict[str, Any]]:
+        bundle = self.voice_bank.load_meeting_bundle_by_key(meeting_key)
+        if bundle is None:
+            return []
+
+        try:
+            target_centroid = self.voice_bank.get_centroid(labeled_name)
+        except KeyError:
+            return []
+
+        merged: list[dict[str, Any]] = []
+        mapping = bundle.get("mapping", {})
+        cluster_profiles = bundle.get("cluster_profiles", {})
+
+        for candidate_label, profile in cluster_profiles.items():
+            if candidate_label == labeled_speaker_label:
+                continue
+
+            current_assignment = mapping.get(candidate_label)
+            if current_assignment and current_assignment.is_known:
+                continue
+
+            centroid = profile.get("centroid")
+            if centroid is None:
+                continue
+
+            score = float(np.dot(l2_normalize(centroid), target_centroid))
+            logger.info(
+                "Review merge candidate: labeled=%s target=%s cluster=%s score=%.4f",
+                labeled_speaker_label,
+                labeled_name,
+                candidate_label,
+                score,
+            )
+            if score < self.voice_match_threshold:
+                continue
+
+            previous_name = (
+                current_assignment.name if current_assignment else candidate_label
+            )
+            merged_result = IdentificationResult(
+                name=labeled_name,
+                confidence=score,
+                is_known=True,
+            )
+            self.voice_bank.update_bundle_assignment(
+                meeting_key=meeting_key,
+                speaker_label=candidate_label,
+                result=merged_result,
+            )
+            merged.append(
+                {
+                    "speaker_label": candidate_label,
+                    "previous_name": previous_name,
+                    "name": labeled_name,
+                    "confidence": score,
+                }
+            )
+            logger.info(
+                "Review merge accepted: cluster=%s -> %s (%.4f)",
+                candidate_label,
+                labeled_name,
+                score,
+            )
+
+        return merged
 
     def _extract_cluster_profiles(
         self,

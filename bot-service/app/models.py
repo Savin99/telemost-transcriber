@@ -65,12 +65,20 @@ class SpeakerLabelRequest(BaseModel):
     alpha: float = 0.05
 
 
+class SpeakerMergedLabel(BaseModel):
+    speaker_label: str
+    previous_name: str
+    name: str
+    confidence: float
+
+
 class SpeakerLabelResponse(BaseModel):
     meeting_id: str
     meeting_key: str
     speaker_label: str
     previous_name: str
     name: str
+    merged_labels: list[SpeakerMergedLabel] = []
 
 
 class HealthResponse(BaseModel):

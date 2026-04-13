@@ -13,8 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.audio_utils import DEFAULT_SAMPLE_RATE, l2_normalize
-from app.speaker_identifier import SpeakerIdentifier
+from app.speaker_identifier import IdentificationResult, SpeakerIdentifier
 from app.transcribe import TranscriberPipeline
+from app.voice_bank import VoiceBank
 
 
 def _write_test_wav(path: Path, duration_seconds: float = 3.0):
@@ -223,6 +224,72 @@ class TranscriberPipelineTests(unittest.TestCase):
                 ["Unknown Speaker 1", "Unknown Speaker 2"],
             )
             self.assertEqual(pipeline.speaker_identifier.calls, 0)
+
+    def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path, duration_seconds=3.0)
+
+            voice_bank = VoiceBank(temp_dir)
+            pipeline = TranscriberPipeline(device="cpu")
+            pipeline._voice_bank = voice_bank
+
+            cluster_profiles = {
+                "SPEAKER_00": {
+                    "segments": [{"start": 0.0, "end": 1.2}],
+                    "embedding_segments": [{"start": 0.0, "end": 1.2}],
+                    "segment_embeddings": [
+                        l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                    ],
+                    "centroid": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                },
+                "SPEAKER_01": {
+                    "segments": [{"start": 1.2, "end": 2.4}],
+                    "embedding_segments": [{"start": 1.2, "end": 2.4}],
+                    "segment_embeddings": [
+                        l2_normalize(np.array([0.96, 0.04], dtype=np.float32)),
+                    ],
+                    "centroid": l2_normalize(np.array([0.96, 0.04], dtype=np.float32)),
+                },
+            }
+            voice_bank.save_meeting_bundle(
+                audio_path=str(audio_path),
+                cluster_profiles=cluster_profiles,
+                mapping={
+                    "SPEAKER_00": IdentificationResult(
+                        name="Unknown Speaker 1",
+                        confidence=0.0,
+                        is_known=False,
+                    ),
+                    "SPEAKER_01": IdentificationResult(
+                        name="Unknown Speaker 2",
+                        confidence=0.0,
+                        is_known=False,
+                    ),
+                },
+                threshold=0.40,
+                ordered_labels=["SPEAKER_00", "SPEAKER_01"],
+            )
+
+            result = pipeline.label_speaker_from_review(
+                meeting_key=voice_bank.meeting_key_for(str(audio_path)),
+                speaker_label="SPEAKER_00",
+                name="Тоже Азиз",
+            )
+
+            self.assertEqual(result["name"], "Азиз")
+            self.assertEqual(
+                [item["speaker_label"] for item in result["merged_labels"]],
+                ["SPEAKER_01"],
+            )
+
+            bundle = voice_bank.load_meeting_bundle(str(audio_path))
+            self.assertEqual(bundle["mapping"]["SPEAKER_00"].name, "Азиз")
+            self.assertEqual(bundle["mapping"]["SPEAKER_01"].name, "Азиз")
+            self.assertEqual(
+                {speaker["name"] for speaker in voice_bank.list_speakers()},
+                {"Азиз"},
+            )
 
 
 if __name__ == "__main__":

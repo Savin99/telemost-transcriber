@@ -21,6 +21,7 @@ from .models import (
     HealthResponse,
     JoinRequest,
     MeetingStatus,
+    SpeakerMergedLabel,
     SpeakerLabelRequest,
     SpeakerLabelResponse,
     SpeakerReviewItem,
@@ -491,21 +492,34 @@ async def label_speaker_review(
             raise HTTPException(status_code=502, detail=str(e))
 
     data = response.json()
-    previous_name = data["previous_name"]
-    await session.execute(
-        update(TranscriptSegmentDB)
-        .where(TranscriptSegmentDB.meeting_id == meeting_id)
-        .where(TranscriptSegmentDB.speaker == previous_name)
-        .values(speaker=data["name"])
+    rename_sources = [data["previous_name"]]
+    rename_sources.extend(
+        item["previous_name"] for item in data.get("merged_labels", [])
     )
+    for previous_name in {name for name in rename_sources if name and name != data["name"]}:
+        await session.execute(
+            update(TranscriptSegmentDB)
+            .where(TranscriptSegmentDB.meeting_id == meeting_id)
+            .where(TranscriptSegmentDB.speaker == previous_name)
+            .values(speaker=data["name"])
+        )
     await session.commit()
 
     return SpeakerLabelResponse(
         meeting_id=meeting_id,
         meeting_key=data["meeting_key"],
         speaker_label=data["speaker_label"],
-        previous_name=previous_name,
+        previous_name=data["previous_name"],
         name=data["name"],
+        merged_labels=[
+            SpeakerMergedLabel(
+                speaker_label=item["speaker_label"],
+                previous_name=item["previous_name"],
+                name=item["name"],
+                confidence=float(item["confidence"]),
+            )
+            for item in data.get("merged_labels", [])
+        ],
     )
 
 
