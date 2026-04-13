@@ -353,6 +353,33 @@ async def get_transcript(
     )
 
 
+@app.get("/meetings", response_model=list[MeetingStatus])
+async def list_meetings(
+    status: str | None = None,
+    limit: int = 10,
+    session: AsyncSession = Depends(get_session),
+):
+    limit = max(1, min(limit, 50))
+    query = select(Meeting).order_by(Meeting.created_at.desc()).limit(limit)
+    if status:
+        query = query.where(Meeting.status == status)
+
+    result = await session.execute(query)
+    meetings = result.scalars().all()
+
+    return [
+        MeetingStatus(
+            meeting_id=meeting.id,
+            status=meeting.status,
+            meeting_url=meeting.meeting_url,
+            duration_seconds=meeting.duration_seconds,
+            error_message=meeting.error_message,
+            created_at=meeting.created_at,
+        )
+        for meeting in meetings
+    ]
+
+
 @app.post(
     "/meetings/{meeting_id}/speaker-review",
     response_model=SpeakerReviewResponse,

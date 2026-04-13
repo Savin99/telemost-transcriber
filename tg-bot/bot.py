@@ -12,6 +12,7 @@ import html
 import logging
 import os
 import re
+from datetime import datetime
 
 import httpx
 from aiogram import Bot, Dispatcher, F
@@ -55,7 +56,9 @@ async def cmd_start(msg: Message):
         "2. Или: <code>/rec https://telemost.yandex.ru/j/...</code>\n\n"
         "<b>Команды:</b>\n"
         "/stop — остановить запись и получить транскрипт\n"
-        "/status — статус текущей записи\n\n"
+        "/status — статус текущей записи\n"
+        "/voices — показать последние готовые встречи для разметки голосов\n"
+        "/voices MEETING_ID — начать разметку для старой записи\n\n"
         "После транскрипта могу прислать примеры аудио для неизвестных голосов, "
         "и ты просто ответишь именем.\n\n"
         "Работаю и в группах — просто добавь меня и кидайте ссылки."
@@ -124,6 +127,49 @@ async def cmd_status(msg: Message):
             await msg.answer(f"Статус: <b>{_safe_html(status)}</b>{dur_str}")
         except Exception as e:
             await msg.answer(f"Ошибка: {_safe_html(e)}")
+
+
+@dp.message(Command("voices"))
+async def cmd_voices(msg: Message, command: CommandObject):
+    meeting_id = (command.args or "").strip()
+    if meeting_id:
+        await _start_speaker_review(msg.chat.id, meeting_id)
+        return
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            response = await client.get(
+                f"{BOT_API}/meetings",
+                params={"status": "done", "limit": 5},
+            )
+            response.raise_for_status()
+            meetings = response.json()
+        except Exception as e:
+            await msg.answer(f"Не удалось получить список встреч: {_safe_html(e)}")
+            return
+
+    if not meetings:
+        await msg.answer("Пока нет готовых встреч для разметки голосов.")
+        return
+
+    lines = ["Последние готовые встречи:", ""]
+    for meeting in meetings:
+        created_at = _format_created_at(meeting.get("created_at"))
+        duration = meeting.get("duration_seconds")
+        duration_text = _format_time(float(duration)) if duration else "?"
+        lines.append(
+            f"<code>{_safe_html(meeting['meeting_id'])}</code>  "
+            f"{_safe_html(created_at)}  {duration_text}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "Чтобы начать разметку, отправь:",
+            "<code>/voices MEETING_ID</code>",
+        ]
+    )
+    await msg.answer("\n".join(lines))
 
 
 @dp.message(Command("skipvoice"))
@@ -311,6 +357,17 @@ def _format_time(seconds: float) -> str:
     return f"{minutes_part}:{seconds_part:02d}"
 
 
+def _format_created_at(value: str | None) -> str:
+    if not value:
+        return "без даты"
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return value
+    return dt.strftime("%d.%m %H:%M")
+
+
 def _format_segment_preview(segments: list[dict]) -> str:
     if not segments:
         return "без подходящих сегментов"
@@ -322,11 +379,7 @@ def _format_segment_preview(segments: list[dict]) -> str:
     return ", ".join(parts)
 
 
-async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
-    meeting_id = transcript.get("meeting_id")
-    if not meeting_id:
-        return
-
+async def _start_speaker_review(chat_id: int, meeting_id: str, quiet: bool = False):
     async with httpx.AsyncClient(timeout=600) as client:
         try:
             response = await client.post(
@@ -339,7 +392,14 @@ async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
             response.raise_for_status()
             review = response.json()
         except Exception as e:
-            logger.warning("Could not start speaker review for %s: %s", meeting_id, e)
+            if quiet:
+                logger.warning("Could not start speaker review for %s: %s", meeting_id, e)
+            else:
+                await bot.send_message(
+                    chat_id,
+                    f"Не удалось подготовить разметку для "
+                    f"<code>{_safe_html(meeting_id)}</code>: {_safe_html(e)}",
+                )
             return
 
     unknown_items = [
@@ -348,6 +408,11 @@ async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
         if not item.get("is_known")
     ]
     if not unknown_items:
+        if not quiet:
+            await bot.send_message(
+                chat_id,
+                f"Для встречи <code>{_safe_html(meeting_id)}</code> новых голосов не нашёл.",
+            )
         return
 
     if chat_id in pending_reviews:
@@ -363,11 +428,19 @@ async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
         chat_id,
         "Я нашёл новые или неизвестные голоса. Сейчас пришлю короткие примеры, "
         "а ты просто ответь именем сообщением.\n\n"
+        f"Встреча: <code>{_safe_html(meeting_id)}</code>\n\n"
         "Команды:\n"
         "/skipvoice — пропустить текущий голос\n"
         "/stopvoices — закончить разметку",
     )
     await _send_next_review_item(chat_id)
+
+
+async def _maybe_start_speaker_review(chat_id: int, transcript: dict):
+    meeting_id = transcript.get("meeting_id")
+    if not meeting_id:
+        return
+    await _start_speaker_review(chat_id, str(meeting_id), quiet=True)
 
 
 async def _send_next_review_item(chat_id: int):
