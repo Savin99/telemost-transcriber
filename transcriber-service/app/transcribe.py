@@ -80,6 +80,8 @@ class TranscriberPipeline:
         self.min_embedding_segment_seconds = float(
             os.getenv("MIN_EMBEDDING_SEGMENT_SEC", "1.0")
         )
+        asr_language = os.getenv("ASR_LANGUAGE", "ru").strip().lower()
+        self.asr_language = None if asr_language in {"", "auto"} else asr_language
 
     def preload(self):
         """Предзагрузка моделей при старте сервиса."""
@@ -305,12 +307,16 @@ class TranscriberPipeline:
             audio = whisperx.load_audio(normalized_audio.normalized_path)
 
             # 1. Транскрипция
-            result = self.asr_model.transcribe(audio, batch_size=16)
+            transcribe_kwargs: dict[str, Any] = {"batch_size": 16}
+            if self.asr_language:
+                transcribe_kwargs["language"] = self.asr_language
+            result = self.asr_model.transcribe(audio, **transcribe_kwargs)
             logger.info("ASR produced %d segments", len(result["segments"]))
 
             # 2. Word-level alignment для русского
+            alignment_language = self.asr_language or result.get("language") or "ru"
             model_a, metadata = whisperx.load_align_model(
-                language_code="ru", device=self.device
+                language_code=alignment_language, device=self.device
             )
             result = whisperx.align(
                 result["segments"], model_a, metadata, audio, device=self.device

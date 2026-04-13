@@ -32,8 +32,10 @@ def _write_test_wav(path: Path, duration_seconds: float = 3.0):
 class FakeAsrModel:
     def __init__(self, segments):
         self.segments = segments
+        self.transcribe_calls = []
 
-    def transcribe(self, audio, batch_size=16):
+    def transcribe(self, audio, batch_size=16, **kwargs):
+        self.transcribe_calls.append({"batch_size": batch_size, **kwargs})
         return {"segments": [dict(segment) for segment in self.segments]}
 
 
@@ -227,6 +229,58 @@ class TranscriberPipelineTests(unittest.TestCase):
 
     def test_review_name_normalization_preserves_initial_dots(self):
         self.assertEqual(normalize_review_speaker_name("Тоже Вадим Л."), "Вадим Л.")
+
+    def test_asr_language_defaults_to_russian(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            with patch.dict("os.environ", {"ASR_LANGUAGE": "ru"}, clear=False):
+                pipeline = self._make_pipeline(
+                    asr_segments=[
+                        {"start": 0.0, "end": 1.2, "text": "Привет"},
+                    ],
+                    diarization_segments=[
+                        {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    ],
+                    identifier_embeddings=[
+                        [1.0, 0.0],
+                    ],
+                    centroids={},
+                )
+
+                with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                    with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}, clear=False):
+                        pipeline.transcribe(str(audio_path))
+
+            self.assertEqual(pipeline.asr_model.transcribe_calls[0]["language"], "ru")
+
+    def test_asr_language_auto_uses_detected_alignment_language(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            with patch.dict("os.environ", {"ASR_LANGUAGE": "auto"}, clear=False):
+                pipeline = self._make_pipeline(
+                    asr_segments=[
+                        {"start": 0.0, "end": 1.2, "text": "Hello"},
+                    ],
+                    diarization_segments=[
+                        {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    ],
+                    identifier_embeddings=[
+                        [1.0, 0.0],
+                    ],
+                    centroids={},
+                )
+                pipeline.asr_model.transcribe = lambda audio, batch_size=16, **kwargs: {
+                    "language": "en",
+                    "segments": [{"start": 0.0, "end": 1.2, "text": "Hello"}],
+                }
+
+                with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                    with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}, clear=False):
+                        pipeline.transcribe(str(audio_path))
+
+            self.assertIsNone(pipeline.asr_language)
 
     def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(self):
         with tempfile.TemporaryDirectory() as temp_dir:
