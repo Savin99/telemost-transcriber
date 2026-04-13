@@ -242,11 +242,6 @@ def process_markdown_file(
         transcript=transcript,
         source_filename=file_info.name,
     )
-    target_parent_id = ensure_drive_folder_path(
-        service,
-        root_folder_id,
-        metadata.folder_path,
-    )
     updated_markdown = rewrite_markdown_title(markdown, metadata.title)
 
     action_bits = [
@@ -259,6 +254,11 @@ def process_markdown_file(
     if not apply:
         return "preview", action
 
+    target_parent_id = ensure_drive_folder_path(
+        service,
+        root_folder_id,
+        metadata.folder_path,
+    )
     link = move_and_update_file(
         service=service,
         file_info=file_info,
