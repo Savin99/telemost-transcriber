@@ -11,4 +11,5 @@ __pycache__/
 recordings/
 voice_bank/
 test_*.py
+!transcriber-service/tests/test_*.py
 whisper_transcript.json

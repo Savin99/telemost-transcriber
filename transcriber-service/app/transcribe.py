@@ -14,6 +14,7 @@ from .audio_utils import (
     slice_waveform,
 )
 from .speaker_identifier import IdentificationResult, SpeakerIdentifier
+from .speaker_refiner import env_bool
 from .voice_bank import VoiceBank
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,7 @@ class TranscriberPipeline:
         self._asr_model = None
         self._diarize_model = None
         self._speaker_identifier = None
+        self._speaker_refiner = None
         self._voice_bank = None
         self.voice_match_threshold = float(os.getenv("VOICE_MATCH_THRESHOLD", "0.40"))
         self.min_embedding_segment_seconds = float(
@@ -91,6 +93,10 @@ class TranscriberPipeline:
         )
         asr_language = os.getenv("ASR_LANGUAGE", "ru").strip().lower()
         self.asr_language = None if asr_language in {"", "auto"} else asr_language
+        self.speaker_llm_refinement_enabled = env_bool(
+            "SPEAKER_LLM_REFINEMENT_ENABLED",
+            False,
+        )
 
     def preload(self):
         """Предзагрузка моделей при старте сервиса."""
@@ -132,6 +138,14 @@ class TranscriberPipeline:
                 min_segment_seconds=self.min_embedding_segment_seconds,
             )
         return self._voice_bank
+
+    @property
+    def speaker_refiner(self):
+        if self._speaker_refiner is None:
+            from .speaker_refiner import AnthropicAdvisorSpeakerRefiner
+
+            self._speaker_refiner = AnthropicAdvisorSpeakerRefiner.from_env()
+        return self._speaker_refiner
 
     @property
     def diarize_model(self):
@@ -367,6 +381,7 @@ class TranscriberPipeline:
             # 3. Формирование результата
             segments = self._build_transcribed_segments(result["segments"], mapping)
             segments = self._repair_short_replies(segments)
+            segments = self._refine_speakers_with_llm(segments)
             seen_names = {
                 segment.speaker for segment in segments if segment.speaker is not None
             }
@@ -376,6 +391,18 @@ class TranscriberPipeline:
                 len(segments),
                 len(seen_names),
             )
+            return segments
+
+    def _refine_speakers_with_llm(
+        self,
+        segments: list[TranscribedSegment],
+    ) -> list[TranscribedSegment]:
+        if not self.speaker_llm_refinement_enabled:
+            return segments
+        try:
+            return self.speaker_refiner.refine(segments)
+        except Exception as exc:
+            logger.warning("Speaker LLM refinement failed: %s", exc)
             return segments
 
     def _build_transcribed_segments(
