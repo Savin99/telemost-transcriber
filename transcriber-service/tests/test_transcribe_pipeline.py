@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from app.audio_utils import DEFAULT_SAMPLE_RATE, l2_normalize
 from app.speaker_identifier import IdentificationResult, SpeakerIdentifier
-from app.transcribe import TranscriberPipeline
+from app.transcribe import TranscriberPipeline, normalize_review_speaker_name
 from app.voice_bank import VoiceBank
 
 
@@ -224,6 +224,9 @@ class TranscriberPipelineTests(unittest.TestCase):
                 ["Unknown Speaker 1", "Unknown Speaker 2"],
             )
             self.assertEqual(pipeline.speaker_identifier.calls, 0)
+
+    def test_review_name_normalization_preserves_initial_dots(self):
+        self.assertEqual(normalize_review_speaker_name("Тоже Вадим Л."), "Вадим Л.")
 
     def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(self):
         with tempfile.TemporaryDirectory() as temp_dir:

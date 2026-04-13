@@ -41,13 +41,13 @@ def normalize_review_speaker_name(name: str) -> str:
         lowered = candidate.casefold()
         for prefix in REVIEW_NAME_PREFIXES:
             if lowered.startswith(prefix):
-                stripped = candidate[len(prefix):].strip(" \t-:,.!?")
+                stripped = candidate[len(prefix):].strip(" \t-:,!?")
                 if stripped:
                     candidate = stripped
                     changed = True
                 break
 
-    candidate = candidate.strip(" \t-:,.!?")
+    candidate = candidate.strip(" \t-:,!?")
     if not candidate:
         raise ValueError("Speaker name cannot be empty")
     return candidate
