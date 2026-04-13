@@ -12,4 +12,5 @@ recordings/
 voice_bank/
 test_*.py
 !transcriber-service/tests/test_*.py
+!tg-bot/tests/test_*.py
 whisper_transcript.json

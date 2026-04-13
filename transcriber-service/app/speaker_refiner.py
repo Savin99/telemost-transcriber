@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01"
+DEFAULT_EXECUTOR_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_ADVISOR_MODEL = "claude-opus-4-1-20250805"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -27,8 +29,8 @@ class AnthropicAdvisorSpeakerRefiner:
     def __init__(
         self,
         api_key: str | None = None,
-        executor_model: str = "claude-sonnet-4-6",
-        advisor_model: str = "claude-opus-4-6",
+        executor_model: str = DEFAULT_EXECUTOR_MODEL,
+        advisor_model: str = DEFAULT_ADVISOR_MODEL,
         advisor_enabled: bool = True,
         advisor_max_uses: int = 2,
         max_tokens: int = 4096,
@@ -50,11 +52,11 @@ class AnthropicAdvisorSpeakerRefiner:
             api_key=os.getenv("ANTHROPIC_API_KEY"),
             executor_model=os.getenv(
                 "SPEAKER_LLM_EXECUTOR_MODEL",
-                "claude-sonnet-4-6",
+                DEFAULT_EXECUTOR_MODEL,
             ),
             advisor_model=os.getenv(
                 "SPEAKER_LLM_ADVISOR_MODEL",
-                "claude-opus-4-6",
+                DEFAULT_ADVISOR_MODEL,
             ),
             advisor_enabled=env_bool("SPEAKER_LLM_ADVISOR_ENABLED", True),
             advisor_max_uses=int(os.getenv("SPEAKER_LLM_ADVISOR_MAX_USES", "2")),

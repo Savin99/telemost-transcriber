@@ -12,7 +12,6 @@
     6. Помечает оригинал как обработанный (description = "transcribed")
 """
 
-import io
 import logging
 import os
 import shutil
@@ -26,7 +25,7 @@ import httpx
 from gdrive import (
     GDRIVE_FOLDER_ID,
     _get_drive_service,
-    format_transcript_md,
+    upload_transcript_md,
 )
 
 logging.basicConfig(
@@ -133,28 +132,6 @@ def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> list[
         return response.json().get("segments", [])
 
 
-def upload_md(service, md_content: str, filename: str) -> str | None:
-    """Загрузить MD файл на Google Drive."""
-    from googleapiclient.http import MediaIoBaseUpload
-
-    file_metadata = {
-        "name": filename,
-        "parents": [GDRIVE_FOLDER_ID],
-        "mimeType": "text/markdown",
-    }
-    media = MediaIoBaseUpload(
-        io.BytesIO(md_content.encode("utf-8")),
-        mimetype="text/markdown",
-        resumable=False,
-    )
-    file = (
-        service.files()
-        .create(body=file_metadata, media_body=media, fields="id, webViewLink")
-        .execute()
-    )
-    return file.get("webViewLink")
-
-
 def mark_as_processed(service, file_id: str):
     """Пометить файл как обработанный (в description)."""
     service.files().update(
@@ -211,13 +188,14 @@ def process_file(service, file_info: dict):
             "meeting_url": "",
             "duration_seconds": segments[-1].get("end", 0) if segments else 0,
         }
-        md_content = format_transcript_md(transcript)
 
         # 4. Загрузить MD
-        stem = Path(filename).stem
-        md_filename = f"{stem}_transcript.md"
-        link = upload_md(service, md_content, md_filename)
-        logger.info("Uploaded transcript: %s -> %s", md_filename, link)
+        link = upload_transcript_md(
+            transcript=transcript,
+            source_filename=filename,
+            service=service,
+        )
+        logger.info("Uploaded transcript for %s -> %s", filename, link)
 
         # 5. Пометить оригинал
         mark_as_processed(service, file_id)

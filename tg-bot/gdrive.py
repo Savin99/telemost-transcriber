@@ -4,12 +4,17 @@ import io
 import logging
 import os
 from datetime import datetime
+from typing import Iterable
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from meeting_metadata import (
+    resolve_meeting_metadata,
+    sanitize_drive_component,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +81,10 @@ def format_transcript_md(transcript: dict) -> str:
     segments = transcript.get("segments", [])
     duration = transcript.get("duration_seconds")
     meeting_url = transcript.get("meeting_url", "")
+    title = str(transcript.get("title") or "Транскрипт встречи").strip()
 
     lines = []
-    lines.append("# Транскрипт встречи")
+    lines.append(f"# {title}")
     lines.append("")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -117,32 +123,97 @@ def format_transcript_md(transcript: dict) -> str:
     return "\n".join(lines)
 
 
-def upload_transcript_md(transcript: dict, filename: str | None = None) -> str | None:
+def _drive_query_quote(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _find_drive_folder(service, name: str, parent_id: str) -> str | None:
+    query = (
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        f"name = '{_drive_query_quote(name)}' and "
+        f"'{_drive_query_quote(parent_id)}' in parents and trashed = false"
+    )
+    response = service.files().list(
+        q=query,
+        spaces="drive",
+        fields="files(id, name)",
+        pageSize=10,
+    ).execute()
+    files = response.get("files", [])
+    if not files:
+        return None
+    return files[0]["id"]
+
+
+def ensure_drive_folder(service, name: str, parent_id: str) -> str:
+    name = sanitize_drive_component(name, fallback="General")
+    existing_id = _find_drive_folder(service, name, parent_id)
+    if existing_id:
+        return existing_id
+
+    folder = service.files().create(
+        body={
+            "name": name,
+            "parents": [parent_id],
+            "mimeType": "application/vnd.google-apps.folder",
+        },
+        fields="id",
+    ).execute()
+    return folder["id"]
+
+
+def ensure_drive_folder_path(
+    service,
+    root_folder_id: str,
+    folder_path: Iterable[str],
+) -> str:
+    current_parent = root_folder_id
+    for folder_name in folder_path:
+        current_parent = ensure_drive_folder(service, folder_name, current_parent)
+    return current_parent
+
+
+def upload_transcript_md(
+    transcript: dict,
+    filename: str | None = None,
+    source_filename: str | None = None,
+    service=None,
+) -> str | None:
     """Загрузить транскрипт как .md файл на Google Drive.
 
     Returns:
         URL файла на Google Drive или None при ошибке.
     """
-    service = _get_drive_service()
+    service = service or _get_drive_service()
     if not service:
         logger.warning("Google Drive not authorized, skipping upload")
         return None
 
     try:
-        md_content = format_transcript_md(transcript)
+        metadata = resolve_meeting_metadata(
+            transcript=transcript,
+            source_filename=source_filename,
+        )
+        enriched_transcript = dict(transcript)
+        enriched_transcript["title"] = metadata.title
 
         if not filename:
-            now = datetime.now().strftime("%Y-%m-%d_%H-%M")
-            filename = f"transcript_{now}.md"
+            filename = metadata.filename
+
+        parent_folder_id = ensure_drive_folder_path(
+            service,
+            GDRIVE_FOLDER_ID,
+            metadata.folder_path,
+        )
 
         file_metadata = {
-            "name": filename,
-            "parents": [GDRIVE_FOLDER_ID],
+            "name": sanitize_drive_component(filename, fallback=metadata.filename),
+            "parents": [parent_folder_id],
             "mimeType": "text/markdown",
         }
 
         media = MediaIoBaseUpload(
-            io.BytesIO(md_content.encode("utf-8")),
+            io.BytesIO(format_transcript_md(enriched_transcript).encode("utf-8")),
             mimetype="text/markdown",
             resumable=False,
         )
@@ -154,7 +225,12 @@ def upload_transcript_md(transcript: dict, filename: str | None = None) -> str |
         ).execute()
 
         link = file.get("webViewLink")
-        logger.info("Transcript uploaded to Google Drive: %s", link)
+        logger.info(
+            "Transcript uploaded to Google Drive: %s (%s/%s)",
+            link,
+            " / ".join(metadata.folder_path),
+            file_metadata["name"],
+        )
         return link
 
     except Exception as e:
