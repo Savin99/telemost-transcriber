@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01"
 
-DEFAULT_EXECUTOR_MODEL = "claude-sonnet-4-20250514"
-DEFAULT_ADVISOR_MODEL = "claude-opus-4-1-20250805"
+DEFAULT_EXECUTOR_MODEL = "claude-sonnet-4-6"
+DEFAULT_ADVISOR_MODEL = "claude-opus-4-6"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
