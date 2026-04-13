@@ -33,6 +33,9 @@ SHORT_REPLY_RE = re.compile(
     r"^(?:да|нет|угу|ага|ок|окей|конечно|верно|точно|ну да)[.!?…]*$",
     re.IGNORECASE,
 )
+MIN_WORD_SPEAKER_CHUNK_WORDS = 2
+MIN_WORD_SPEAKER_CHUNK_SECONDS = 0.35
+MIN_WORD_SPEAKER_CHUNK_CHARS = 5
 
 
 def normalize_review_speaker_name(name: str) -> str:
@@ -436,6 +439,10 @@ class TranscriberPipeline:
         if len(chunks) <= 1:
             return []
 
+        chunks = self._merge_unstable_word_speaker_chunks(chunks)
+        if len(chunks) <= 1:
+            return []
+
         return [
             TranscribedSegment(
                 speaker=chunk["speaker"],
@@ -446,6 +453,108 @@ class TranscriberPipeline:
             for chunk in chunks
             if chunk["words"]
         ]
+
+    def _merge_unstable_word_speaker_chunks(
+        self,
+        chunks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged = [dict(chunk, words=list(chunk["words"])) for chunk in chunks]
+        while True:
+            unstable_index = next(
+                (
+                    index
+                    for index, chunk in enumerate(merged)
+                    if not self._is_stable_word_speaker_chunk(chunk)
+                ),
+                None,
+            )
+            if unstable_index is None:
+                break
+            if len(merged) <= 1:
+                break
+
+            target_index = self._nearest_stable_word_chunk_index(
+                merged,
+                unstable_index,
+            )
+            if target_index is None:
+                return []
+
+            chunk = merged.pop(unstable_index)
+            if unstable_index < target_index:
+                target_index -= 1
+
+            target = merged[target_index]
+            if target["start"] <= chunk["start"]:
+                target["words"].extend(chunk["words"])
+            else:
+                target["words"] = chunk["words"] + target["words"]
+            target["start"] = min(float(target["start"]), float(chunk["start"]))
+            target["end"] = max(float(target["end"]), float(chunk["end"]))
+
+        return self._coalesce_adjacent_word_chunks(merged)
+
+    def _nearest_stable_word_chunk_index(
+        self,
+        chunks: list[dict[str, Any]],
+        unstable_index: int,
+    ) -> int | None:
+        previous_index = None
+        for index in range(unstable_index - 1, -1, -1):
+            if self._is_stable_word_speaker_chunk(chunks[index]):
+                previous_index = index
+                break
+
+        next_index = None
+        for index in range(unstable_index + 1, len(chunks)):
+            if self._is_stable_word_speaker_chunk(chunks[index]):
+                next_index = index
+                break
+
+        if previous_index is None:
+            return next_index
+        if next_index is None:
+            return previous_index
+
+        previous_chunk = chunks[previous_index]
+        next_chunk = chunks[next_index]
+        current_chunk = chunks[unstable_index]
+        if previous_chunk["speaker"] == next_chunk["speaker"]:
+            return previous_index
+        if previous_chunk["speaker"] == current_chunk["speaker"]:
+            return previous_index
+        if next_chunk["speaker"] == current_chunk["speaker"]:
+            return next_index
+
+        previous_gap = abs(float(current_chunk["start"]) - float(previous_chunk["end"]))
+        next_gap = abs(float(next_chunk["start"]) - float(current_chunk["end"]))
+        return previous_index if previous_gap <= next_gap else next_index
+
+    def _is_stable_word_speaker_chunk(self, chunk: dict[str, Any]) -> bool:
+        word_count = len(chunk.get("words") or [])
+        duration = float(chunk["end"]) - float(chunk["start"])
+        text = self._join_word_text(chunk.get("words") or [])
+        return (
+            word_count >= MIN_WORD_SPEAKER_CHUNK_WORDS
+            and duration >= MIN_WORD_SPEAKER_CHUNK_SECONDS
+            and len(text) >= MIN_WORD_SPEAKER_CHUNK_CHARS
+        )
+
+    def _coalesce_adjacent_word_chunks(
+        self,
+        chunks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        coalesced: list[dict[str, Any]] = []
+        for chunk in chunks:
+            if coalesced and coalesced[-1]["speaker"] == chunk["speaker"]:
+                coalesced[-1]["words"].extend(chunk["words"])
+                coalesced[-1]["end"] = max(
+                    float(coalesced[-1]["end"]),
+                    float(chunk["end"]),
+                )
+                continue
+            coalesced.append(chunk)
+        return coalesced
 
     def _repair_short_replies(
         self,

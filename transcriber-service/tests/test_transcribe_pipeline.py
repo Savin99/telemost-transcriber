@@ -294,11 +294,17 @@ class TranscriberPipelineTests(unittest.TestCase):
                     "start": 0.0,
                     "end": 2.0,
                     "speaker": "SPEAKER_00",
-                    "text": "Вопрос да ответ",
+                    "text": "Первый вопрос да конечно следующий ответ",
                     "words": [
                         {
-                            "word": "Вопрос",
+                            "word": "Первый",
                             "start": 0.0,
+                            "end": 0.3,
+                            "speaker": "SPEAKER_00",
+                        },
+                        {
+                            "word": "вопрос",
+                            "start": 0.4,
                             "end": 0.7,
                             "speaker": "SPEAKER_00",
                         },
@@ -309,8 +315,20 @@ class TranscriberPipelineTests(unittest.TestCase):
                             "speaker": "SPEAKER_01",
                         },
                         {
-                            "word": "ответ",
+                            "word": "конечно",
                             "start": 1.1,
+                            "end": 1.4,
+                            "speaker": "SPEAKER_01",
+                        },
+                        {
+                            "word": "следующий",
+                            "start": 1.5,
+                            "end": 1.7,
+                            "speaker": "SPEAKER_00",
+                        },
+                        {
+                            "word": "ответ",
+                            "start": 1.8,
                             "end": 2.0,
                             "speaker": "SPEAKER_00",
                         },
@@ -334,10 +352,66 @@ class TranscriberPipelineTests(unittest.TestCase):
         self.assertEqual(
             [(segment.speaker, segment.text) for segment in segments],
             [
-                ("Вячеслав Т.", "Вопрос"),
-                ("Ольга", "да"),
-                ("Вячеслав Т.", "ответ"),
+                ("Вячеслав Т.", "Первый вопрос"),
+                ("Ольга", "да конечно"),
+                ("Вячеслав Т.", "следующий ответ"),
             ],
+        )
+
+    def test_tiny_word_speaker_chunks_are_not_split_out(self):
+        pipeline = TranscriberPipeline(device="cpu")
+        segments = pipeline._build_transcribed_segments(
+            [
+                {
+                    "start": 0.0,
+                    "end": 2.0,
+                    "speaker": "SPEAKER_00",
+                    "text": "У вас какие позиции?",
+                    "words": [
+                        {
+                            "word": "У",
+                            "start": 0.0,
+                            "end": 0.02,
+                            "speaker": "SPEAKER_01",
+                        },
+                        {
+                            "word": "вас",
+                            "start": 0.04,
+                            "end": 0.3,
+                            "speaker": "SPEAKER_00",
+                        },
+                        {
+                            "word": "какие",
+                            "start": 0.4,
+                            "end": 0.8,
+                            "speaker": "SPEAKER_00",
+                        },
+                        {
+                            "word": "позиции?",
+                            "start": 0.82,
+                            "end": 1.5,
+                            "speaker": "SPEAKER_01",
+                        },
+                    ],
+                }
+            ],
+            {
+                "SPEAKER_00": IdentificationResult(
+                    name="Вячеслав Т.",
+                    confidence=1.0,
+                    is_known=True,
+                ),
+                "SPEAKER_01": IdentificationResult(
+                    name="Ольга",
+                    confidence=1.0,
+                    is_known=True,
+                ),
+            },
+        )
+
+        self.assertEqual(
+            [(segment.speaker, segment.text) for segment in segments],
+            [("Вячеслав Т.", "У вас какие позиции?")],
         )
 
     def test_short_reply_between_question_and_followup_is_reassigned(self):
