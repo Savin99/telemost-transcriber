@@ -72,17 +72,17 @@ log "Pull готов"
 # --- 3. Рестарт сервисов ---
 restart_tg() {
     log "Рестарт tg-bot..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TG_BOT_TOKEN:-}\" ]; then echo 'tg-bot skipped: TG_BOT_TOKEN is not set'; else pkill -f '[p]ython bot.py' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/tg-bot && source /venv/main/bin/activate 2>/dev/null || true && TG_BOT_TOKEN=\$TG_BOT_TOKEN BOT_API_URL=http://localhost:8000 nohup python bot.py > $REMOTE_LOGS/tg-bot.log 2>&1 < /dev/null & echo 'tg-bot PID: '\$!; fi" 2>/dev/null
+    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TG_BOT_TOKEN:-}\" ]; then echo 'tg-bot skipped: TG_BOT_TOKEN is not set'; else pkill -f '^/venv/main/bin/python bot.py$' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/tg-bot && TG_BOT_TOKEN=\$TG_BOT_TOKEN BOT_API_URL=http://localhost:8000 nohup /venv/main/bin/python bot.py > $REMOTE_LOGS/tg-bot.log 2>&1 < /dev/null & echo 'tg-bot PID: '\$!; fi" 2>/dev/null
 }
 
 restart_bot() {
     log "Рестарт bot-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; pkill -f '[u]vicorn app.main:app.*8000' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && source /venv/main/bin/activate 2>/dev/null || true && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:///\/workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" DISPLAY=:99 nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null & echo 'bot-service PID: '\$!" 2>/dev/null
+    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:///\/workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null & echo 'bot-service PID: '\$!" 2>/dev/null
 }
 
 restart_transcriber() {
     log "Рестарт transcriber-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; mkdir -p /workspace/voice_bank; pkill -f '[u]vicorn app.main:app.*8001' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/transcriber-service && source /venv/main/bin/activate 2>/dev/null || true && HF_TOKEN=\${HF_TOKEN:-} DIARIZATION_MODEL=\${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1} CLUSTERING_THRESHOLD=\${CLUSTERING_THRESHOLD:-0.35} CLUSTERING_FA=\${CLUSTERING_FA:-0.04} CLUSTERING_FB=\${CLUSTERING_FB:-0.9} VOICE_BANK_DIR=\${VOICE_BANK_DIR:-/workspace/voice_bank} VOICE_MATCH_THRESHOLD=\${VOICE_MATCH_THRESHOLD:-0.40} MIN_EMBEDDING_SEGMENT_SEC=\${MIN_EMBEDDING_SEGMENT_SEC:-1.0} nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > $REMOTE_LOGS/transcriber.log 2>&1 < /dev/null & echo 'transcriber-service PID: '\$!" 2>/dev/null
+    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; mkdir -p /workspace/voice_bank; fuser -k 8001/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/transcriber-service && HF_TOKEN=\${HF_TOKEN:-} DIARIZATION_MODEL=\${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1} CLUSTERING_THRESHOLD=\${CLUSTERING_THRESHOLD:-0.35} CLUSTERING_FA=\${CLUSTERING_FA:-0.04} CLUSTERING_FB=\${CLUSTERING_FB:-0.9} VOICE_BANK_DIR=\${VOICE_BANK_DIR:-/workspace/voice_bank} VOICE_MATCH_THRESHOLD=\${VOICE_MATCH_THRESHOLD:-0.40} MIN_EMBEDDING_SEGMENT_SEC=\${MIN_EMBEDDING_SEGMENT_SEC:-1.0} nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > $REMOTE_LOGS/transcriber.log 2>&1 < /dev/null & echo 'transcriber-service PID: '\$!" 2>/dev/null
 }
 
 case "$TARGET" in
