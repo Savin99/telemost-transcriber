@@ -24,7 +24,7 @@ from gdrive import (
     _get_drive_service,
     ensure_drive_folder_path,
 )
-from meeting_metadata import resolve_meeting_metadata
+from meeting_metadata import resolve_meeting_metadata, slugify_filename_stem
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,11 +90,17 @@ def parse_markdown_transcript(content: str) -> dict:
         "segments": [],
         "meeting_url": "",
         "duration_seconds": 0,
+        "meeting_date": "",
     }
     lines = content.splitlines()
 
     for line in lines:
-        if line.startswith("**Ссылка:**"):
+        if line.startswith("**Дата:**"):
+            raw_date = line.split("**Дата:**", 1)[1].strip()
+            date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", raw_date)
+            if date_match:
+                transcript["meeting_date"] = date_match.group(0)
+        elif line.startswith("**Ссылка:**"):
             transcript["meeting_url"] = line.split("**Ссылка:**", 1)[1].strip()
         elif line.startswith("**Длительность:**"):
             parsed_duration = parse_duration(line.split("**Длительность:**", 1)[1].strip())
@@ -149,6 +155,13 @@ def rewrite_markdown_title(content: str, title: str) -> str:
     if content.endswith("\n"):
         return rewritten + "\n"
     return rewritten
+
+
+def rebuild_filename_with_original_date(metadata, transcript: dict) -> str:
+    meeting_date = str(transcript.get("meeting_date") or "").strip()
+    if not meeting_date:
+        return metadata.filename
+    return f"{slugify_filename_stem(metadata.title)}_{meeting_date}.md"
 
 
 def iter_drive_children(service, parent_id: str) -> list[dict]:
@@ -242,11 +255,12 @@ def process_markdown_file(
         transcript=transcript,
         source_filename=file_info.name,
     )
+    target_name = rebuild_filename_with_original_date(metadata, transcript)
     updated_markdown = rewrite_markdown_title(markdown, metadata.title)
 
     action_bits = [
         f"{'/'.join(file_info.folder_path) or '.'}/{file_info.name}",
-        f"-> {'/'.join(metadata.folder_path)}/{metadata.filename}",
+        f"-> {'/'.join(metadata.folder_path)}/{target_name}",
         f"[{metadata.source}]",
     ]
     action = " ".join(action_bits)
@@ -263,7 +277,7 @@ def process_markdown_file(
         service=service,
         file_info=file_info,
         target_parent_id=target_parent_id,
-        target_name=metadata.filename,
+        target_name=target_name,
         updated_markdown=updated_markdown,
     )
     suffix = f" ({link})" if link else ""

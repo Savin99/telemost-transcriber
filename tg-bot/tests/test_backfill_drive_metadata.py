@@ -7,9 +7,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backfill_drive_metadata import (  # noqa: E402
+    rebuild_filename_with_original_date,
     parse_markdown_transcript,
     rewrite_markdown_title,
 )
+from meeting_metadata import MeetingMetadata  # noqa: E402
 
 
 class BackfillDriveMetadataTests(unittest.TestCase):
@@ -35,6 +37,7 @@ class BackfillDriveMetadataTests(unittest.TestCase):
 """
         transcript = parse_markdown_transcript(markdown)
 
+        self.assertEqual(transcript["meeting_date"], "2026-04-13")
         self.assertEqual(transcript["meeting_url"], "https://telemost.yandex.ru/j/123")
         self.assertEqual(transcript["duration_seconds"], 23 * 60 + 48)
         self.assertEqual(len(transcript["segments"]), 2)
@@ -47,6 +50,19 @@ class BackfillDriveMetadataTests(unittest.TestCase):
         original = "# Старый заголовок\n\nТекст\n"
         rewritten = rewrite_markdown_title(original, "Новый заголовок")
         self.assertEqual(rewritten, "# Новый заголовок\n\nТекст\n")
+
+    def test_rebuild_filename_uses_original_meeting_date(self):
+        metadata = MeetingMetadata(
+            title="Harness - Егор В. и Илья С.",
+            folder_path=["Projects", "Harness"],
+            filename="harness-2026-04-13.md",
+            source="rule",
+        )
+        transcript = {"meeting_date": "2026-04-07"}
+        self.assertEqual(
+            rebuild_filename_with_original_date(metadata, transcript),
+            "harness-егор-в-и-илья-с_2026-04-07.md",
+        )
 
 
 if __name__ == "__main__":
