@@ -15,6 +15,7 @@
 import io
 import logging
 import os
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://localhost:8001")
 POLL_INTERVAL = int(os.getenv("DRIVE_POLL_INTERVAL", "30"))
 WORK_DIR = Path(os.getenv("DRIVE_WORK_DIR", "/tmp/drive_watcher"))
+ARCHIVE_DIR = Path(os.getenv("DRIVE_ARCHIVE_DIR", "/workspace/recordings/drive_imports"))
 AUDIO_MIMES = {
     "audio/mpeg",
     "audio/mp3",
@@ -100,6 +102,21 @@ def download_file(service, file_id: str, filename: str, dest_dir: Path) -> Path:
 
     logger.info("Downloaded %s (%d bytes)", dest_path, dest_path.stat().st_size)
     return dest_path
+
+
+def archive_file(source_path: Path, file_id: str, filename: str) -> Path:
+    """Сохранить исходник в постоянное хранилище до очистки /tmp."""
+    archive_dir = ARCHIVE_DIR / file_id
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / filename
+
+    if archive_path.exists() and archive_path.stat().st_size == source_path.stat().st_size:
+        logger.info("Archive already exists: %s", archive_path)
+        return archive_path
+
+    shutil.copy2(source_path, archive_path)
+    logger.info("Archived source recording to %s", archive_path)
+    return archive_path
 
 
 def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> list[dict]:
@@ -174,11 +191,12 @@ def process_file(service, file_info: dict):
     work_dir = WORK_DIR / file_id
     try:
         # 1. Скачать
-        audio_path = download_file(service, file_id, filename, work_dir)
+        downloaded_path = download_file(service, file_id, filename, work_dir)
+        archived_path = archive_file(downloaded_path, file_id, filename)
 
         # 2. Транскрибировать
         logger.info("Transcribing %s (speakers=%s)...", filename, num_speakers)
-        segments = transcribe_audio(audio_path, num_speakers=num_speakers)
+        segments = transcribe_audio(archived_path, num_speakers=num_speakers)
 
         if not segments:
             logger.warning("No segments found for %s — empty audio?", filename)
@@ -209,8 +227,6 @@ def process_file(service, file_info: dict):
         logger.exception("Failed to process %s: %s", filename, e)
     finally:
         # Очистить рабочую директорию
-        import shutil
-
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
