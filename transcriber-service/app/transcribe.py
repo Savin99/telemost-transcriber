@@ -235,12 +235,15 @@ class TranscriberPipeline:
                 max_speakers=max_speakers,
             )
 
+        sample_segments = self.voice_bank.select_review_segments(bundle)
         sample_paths = self.voice_bank.export_meeting_samples(
             audio_path=audio_path,
             bundle=bundle,
             samples_per_speaker=samples_per_speaker,
             sample_max_seconds=sample_max_seconds,
+            sample_segments=sample_segments,
         )
+        bundle["sample_segments"] = sample_segments
         bundle["sample_paths"] = sample_paths
         return bundle
 

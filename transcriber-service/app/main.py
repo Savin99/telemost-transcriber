@@ -161,7 +161,11 @@ async def speaker_review(request: SpeakerReviewRequest):
             current_name = result.name if result else speaker_label
             confidence = result.confidence if result else 0.0
             is_known = result.is_known if result else False
-            segments = profile.get("embedding_segments") or profile.get("segments") or []
+            sample_segments = bundle.get("sample_segments", {})
+            if speaker_label in sample_segments:
+                segments = sample_segments[speaker_label]
+            else:
+                segments = profile.get("embedding_segments") or profile.get("segments") or []
             items.append(
                 SpeakerReviewItemResponse(
                     speaker_label=speaker_label,

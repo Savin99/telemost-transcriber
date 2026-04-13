@@ -416,7 +416,7 @@ async def _start_speaker_review(chat_id: int, meeting_id: str, quiet: bool = Fal
     unknown_items = [
         item
         for item in review.get("items", [])
-        if not item.get("is_known")
+        if not item.get("is_known") and int(item.get("sample_count", 0)) > 0
     ]
     if not unknown_items:
         if not quiet:

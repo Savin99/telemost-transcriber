@@ -187,6 +187,88 @@ class VoiceBankTests(unittest.TestCase):
             )
             np.testing.assert_allclose(updated_centroid, expected, atol=1e-6)
 
+    def test_review_segments_skip_known_contamination_for_unknown_cluster(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "speaker.wav"
+            _write_test_wav(audio_path)
+            voice_bank = VoiceBank(
+                temp_dir,
+                speaker_identifier=QueueIdentifier([[1.0, 0.0]]),
+            )
+            voice_bank.enroll("Вадим Л.", [str(audio_path)])
+
+            vadim_segment = {"start": 0.0, "end": 1.2}
+            new_speaker_segment = {"start": 1.2, "end": 2.4}
+            bundle = {
+                "threshold": 0.40,
+                "cluster_profiles": {
+                    "SPEAKER_01": {
+                        "segments": [vadim_segment, new_speaker_segment],
+                        "embedding_segments": [vadim_segment, new_speaker_segment],
+                        "segment_embeddings": [
+                            l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                            l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                        ],
+                    }
+                },
+                "mapping": {
+                    "SPEAKER_01": IdentificationResult(
+                        name="Unknown Speaker 1",
+                        confidence=0.0,
+                        is_known=False,
+                    )
+                },
+            }
+
+            selected = voice_bank.select_review_segments(bundle)
+
+            self.assertEqual(selected["SPEAKER_01"], [new_speaker_segment])
+
+    def test_learning_from_bundle_skips_other_known_speaker_embeddings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "speaker.wav"
+            _write_test_wav(audio_path)
+            voice_bank = VoiceBank(
+                temp_dir,
+                speaker_identifier=QueueIdentifier([[1.0, 0.0]]),
+            )
+            voice_bank.enroll("Вадим Л.", [str(audio_path)])
+
+            meeting_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(meeting_path, duration_seconds=2.5)
+            bundle = {
+                "threshold": 0.40,
+                "cluster_profiles": {
+                    "SPEAKER_01": {
+                        "segments": [
+                            {"start": 0.0, "end": 1.2},
+                            {"start": 1.2, "end": 2.4},
+                        ],
+                        "embedding_segments": [
+                            {"start": 0.0, "end": 1.2},
+                            {"start": 1.2, "end": 2.4},
+                        ],
+                        "segment_embeddings": [
+                            l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                            l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                        ],
+                    }
+                },
+            }
+
+            voice_bank.learn_from_diarization_label(
+                "Егор В.",
+                str(meeting_path),
+                bundle,
+                "SPEAKER_01",
+            )
+
+            np.testing.assert_allclose(
+                voice_bank.get_centroid("Егор В."),
+                l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                atol=1e-6,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

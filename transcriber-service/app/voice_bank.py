@@ -79,6 +79,12 @@ class VoiceBank:
             diarization=diarization,
             speaker_label=speaker_label,
         )
+        embeddings = self._filter_known_contamination(
+            target_name=name,
+            embeddings=embeddings,
+            context=diarization,
+            speaker_label=speaker_label,
+        )
         if not embeddings:
             raise ValueError(
                 f"No diarization embeddings available for speaker label {speaker_label}"
@@ -231,6 +237,12 @@ class VoiceBank:
             diarization=diarization,
             speaker_label=speaker_label,
         )
+        embeddings = self._filter_known_contamination(
+            target_name=name,
+            embeddings=embeddings,
+            context=diarization,
+            speaker_label=speaker_label,
+        )
         if not embeddings:
             raise ValueError(
                 f"No diarization embeddings available for speaker label {speaker_label}"
@@ -256,22 +268,47 @@ class VoiceBank:
         )
         return IdentificationResult(name=name, confidence=1.0, is_known=True)
 
+    def select_review_segments(self, bundle: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        centroids = self.get_all_centroids()
+        threshold = self._threshold_from_context(bundle)
+        selected: dict[str, list[dict[str, Any]]] = {}
+        for speaker_label, profile in bundle.get("cluster_profiles", {}).items():
+            selected[speaker_label] = self._select_review_segments_for_label(
+                speaker_label=speaker_label,
+                profile=profile,
+                bundle=bundle,
+                centroids=centroids,
+                threshold=threshold,
+            )
+        return selected
+
     def export_meeting_samples(
         self,
         audio_path: str,
         bundle: dict[str, Any],
         samples_per_speaker: int = 3,
         sample_max_seconds: float = 12.0,
+        sample_segments: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, list[str]]:
         bundle_dir = Path(bundle.get("bundle_dir") or self.meeting_dir_for(audio_path))
         samples_dir = bundle_dir / "samples"
         samples_dir.mkdir(parents=True, exist_ok=True)
 
+        if sample_segments is None:
+            sample_segments = self.select_review_segments(bundle)
+
         sample_paths: dict[str, list[str]] = {}
         with normalized_audio_file(audio_path) as normalized_audio:
             waveform, sample_rate = load_wav_mono(normalized_audio.normalized_path)
             for speaker_label, profile in bundle.get("cluster_profiles", {}).items():
-                segments = profile.get("embedding_segments") or profile.get("segments") or []
+                if speaker_label in sample_segments:
+                    segments = sample_segments[speaker_label]
+                else:
+                    segments = (
+                        profile.get("embedding_segments")
+                        or profile.get("segments")
+                        or []
+                    )
                 exported = []
                 for index, segment in enumerate(segments[:samples_per_speaker]):
                     start = float(segment["start"])
@@ -284,6 +321,47 @@ class VoiceBank:
                     exported.append(str(output_path))
                 sample_paths[speaker_label] = exported
         return sample_paths
+
+    def _select_review_segments_for_label(
+        self,
+        speaker_label: str,
+        profile: dict[str, Any],
+        bundle: dict[str, Any],
+        centroids: dict[str, np.ndarray],
+        threshold: float,
+    ) -> list[dict[str, Any]]:
+        embedding_segments = profile.get("embedding_segments") or []
+        segment_embeddings = profile.get("segment_embeddings") or []
+        fallback_segments = profile.get("segments") or []
+        if not embedding_segments:
+            return fallback_segments
+
+        if not centroids or not segment_embeddings:
+            return embedding_segments
+
+        mapping = bundle.get("mapping", {})
+        assignment = mapping.get(speaker_label)
+        if self._assignment_is_known(assignment):
+            return embedding_segments
+
+        selected: list[dict[str, Any]] = []
+        for segment, embedding in zip(embedding_segments, segment_embeddings):
+            best_name, best_score = self._best_centroid_match(embedding, centroids)
+            if best_name is not None and best_score >= threshold:
+                logger.info(
+                    "Skipping review sample for %s %.2f-%.2f: already matches %s (%.4f)",
+                    speaker_label,
+                    float(segment["start"]),
+                    float(segment["end"]),
+                    best_name,
+                    best_score,
+                )
+                continue
+            selected.append(segment)
+
+        if len(embedding_segments) > len(segment_embeddings):
+            selected.extend(embedding_segments[len(segment_embeddings):])
+        return selected
 
     def update_bundle_assignment(
         self,
@@ -389,6 +467,82 @@ class VoiceBank:
                     self.speaker_identifier.extract_embedding(segment_waveform, sample_rate)
                 )
             return embeddings
+
+    def _filter_known_contamination(
+        self,
+        target_name: str,
+        embeddings: list[np.ndarray],
+        context,
+        speaker_label: str,
+    ) -> list[np.ndarray]:
+        if not embeddings or not isinstance(context, dict):
+            return embeddings
+
+        centroids = self.get_all_centroids()
+        if not centroids:
+            return embeddings
+
+        threshold = self._threshold_from_context(context)
+        filtered: list[np.ndarray] = []
+        for embedding in embeddings:
+            normalized_embedding = l2_normalize(np.asarray(embedding, dtype=np.float32))
+            best_name, best_score = self._best_centroid_match(
+                normalized_embedding,
+                centroids,
+            )
+            if (
+                best_name is not None
+                and best_name != target_name
+                and best_score >= threshold
+            ):
+                logger.info(
+                    "Skipping enrollment embedding for %s -> %s: matches %s (%.4f)",
+                    speaker_label,
+                    target_name,
+                    best_name,
+                    best_score,
+                )
+                continue
+            filtered.append(normalized_embedding)
+
+        if len(filtered) != len(embeddings):
+            logger.info(
+                "Filtered %d known-contamination embeddings from %s -> %s",
+                len(embeddings) - len(filtered),
+                speaker_label,
+                target_name,
+            )
+        return filtered
+
+    def _threshold_from_context(self, context) -> float:
+        if isinstance(context, dict):
+            try:
+                return float(context.get("threshold", 0.40))
+            except (TypeError, ValueError):
+                return 0.40
+        return 0.40
+
+    def _assignment_is_known(self, assignment) -> bool:
+        if assignment is None:
+            return False
+        if isinstance(assignment, dict):
+            return bool(assignment.get("is_known"))
+        return bool(getattr(assignment, "is_known", False))
+
+    def _best_centroid_match(
+        self,
+        embedding: np.ndarray,
+        centroids: dict[str, np.ndarray],
+    ) -> tuple[str | None, float]:
+        best_name: str | None = None
+        best_score = float("-inf")
+        normalized_embedding = l2_normalize(np.asarray(embedding, dtype=np.float32))
+        for name, centroid in centroids.items():
+            score = float(np.dot(normalized_embedding, centroid))
+            if score > best_score:
+                best_name = name
+                best_score = score
+        return best_name, best_score
 
     def _iter_diarization_segments(self, diarization):
         if diarization is None:
