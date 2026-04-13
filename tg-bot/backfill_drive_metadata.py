@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 import re
 from collections import deque
 from dataclasses import dataclass
@@ -184,6 +185,40 @@ def rebuild_filename_with_original_date(metadata, transcript: dict, source_filen
     return f"{slugify_filename_stem(metadata.title)}_{meeting_date}.md"
 
 
+def build_collision_suffix(file_info: DriveMarkdownFile) -> str:
+    source_name = file_info.name
+    uuid_match = re.search(
+        r"(?<![0-9a-f])([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])",
+        source_name,
+        flags=re.IGNORECASE,
+    )
+    if uuid_match:
+        return uuid_match.group(1).lower()
+
+    timestamp_match = re.search(r"\b\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\b", source_name)
+    if timestamp_match:
+        return timestamp_match.group(0).replace("_", "-")
+
+    return file_info.file_id[:8].lower()
+
+
+def uniquify_target_name(
+    target_name: str,
+    folder_path: list[str],
+    file_info: DriveMarkdownFile,
+    seen_targets: dict[tuple[tuple[str, ...], str], int],
+) -> str:
+    key = (tuple(folder_path), target_name.casefold())
+    occurrence = seen_targets.get(key, 0)
+    seen_targets[key] = occurrence + 1
+    if occurrence == 0:
+        return target_name
+
+    stem, ext = os.path.splitext(target_name)
+    suffix = build_collision_suffix(file_info)
+    return f"{stem}_{suffix}{ext}"
+
+
 def iter_drive_children(service, parent_id: str) -> list[dict]:
     items: list[dict] = []
     page_token = None
@@ -268,6 +303,7 @@ def process_markdown_file(
     file_info: DriveMarkdownFile,
     root_folder_id: str,
     apply: bool,
+    seen_targets: dict[tuple[tuple[str, ...], str], int],
 ) -> tuple[str, str]:
     markdown = download_markdown(service, file_info.file_id)
     transcript = parse_markdown_transcript(markdown)
@@ -279,6 +315,12 @@ def process_markdown_file(
         metadata,
         transcript,
         source_filename=file_info.name,
+    )
+    target_name = uniquify_target_name(
+        target_name=target_name,
+        folder_path=metadata.folder_path,
+        file_info=file_info,
+        seen_targets=seen_targets,
     )
     updated_markdown = rewrite_markdown_title(markdown, metadata.title)
 
@@ -331,6 +373,7 @@ def main() -> int:
     )
 
     updated = 0
+    seen_targets: dict[tuple[tuple[str, ...], str], int] = {}
     for index, file_info in enumerate(markdown_files, start=1):
         try:
             status, message = process_markdown_file(
@@ -338,6 +381,7 @@ def main() -> int:
                 file_info=file_info,
                 root_folder_id=args.root_folder_id,
                 apply=args.apply,
+                seen_targets=seen_targets,
             )
             logger.info("[%d/%d] %s: %s", index, len(markdown_files), status, message)
             if status == "updated":
