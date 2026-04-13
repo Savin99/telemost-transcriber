@@ -14,7 +14,11 @@ if str(ROOT) not in sys.path:
 
 from app.audio_utils import DEFAULT_SAMPLE_RATE, l2_normalize
 from app.speaker_identifier import IdentificationResult, SpeakerIdentifier
-from app.transcribe import TranscriberPipeline, normalize_review_speaker_name
+from app.transcribe import (
+    TranscribedSegment,
+    TranscriberPipeline,
+    normalize_review_speaker_name,
+)
 from app.voice_bank import VoiceBank
 
 
@@ -281,6 +285,93 @@ class TranscriberPipelineTests(unittest.TestCase):
                         pipeline.transcribe(str(audio_path))
 
             self.assertIsNone(pipeline.asr_language)
+
+    def test_final_segments_split_on_word_speaker_changes(self):
+        pipeline = TranscriberPipeline(device="cpu")
+        segments = pipeline._build_transcribed_segments(
+            [
+                {
+                    "start": 0.0,
+                    "end": 2.0,
+                    "speaker": "SPEAKER_00",
+                    "text": "Вопрос да ответ",
+                    "words": [
+                        {
+                            "word": "Вопрос",
+                            "start": 0.0,
+                            "end": 0.7,
+                            "speaker": "SPEAKER_00",
+                        },
+                        {
+                            "word": "да",
+                            "start": 0.8,
+                            "end": 1.0,
+                            "speaker": "SPEAKER_01",
+                        },
+                        {
+                            "word": "ответ",
+                            "start": 1.1,
+                            "end": 2.0,
+                            "speaker": "SPEAKER_00",
+                        },
+                    ],
+                }
+            ],
+            {
+                "SPEAKER_00": IdentificationResult(
+                    name="Вячеслав Т.",
+                    confidence=1.0,
+                    is_known=True,
+                ),
+                "SPEAKER_01": IdentificationResult(
+                    name="Ольга",
+                    confidence=1.0,
+                    is_known=True,
+                ),
+            },
+        )
+
+        self.assertEqual(
+            [(segment.speaker, segment.text) for segment in segments],
+            [
+                ("Вячеслав Т.", "Вопрос"),
+                ("Ольга", "да"),
+                ("Вячеслав Т.", "ответ"),
+            ],
+        )
+
+    def test_short_reply_between_question_and_followup_is_reassigned(self):
+        pipeline = TranscriberPipeline(device="cpu")
+        segments = pipeline._repair_short_replies(
+            [
+                TranscribedSegment(
+                    speaker="Ольга",
+                    start=180.0,
+                    end=190.0,
+                    text="Это идеальный вариант.",
+                ),
+                TranscribedSegment(
+                    speaker="Вячеслав Т.",
+                    start=194.0,
+                    end=196.0,
+                    text="То есть вы в Москве находитесь?",
+                ),
+                TranscribedSegment(
+                    speaker="Вячеслав Т.",
+                    start=196.3,
+                    end=200.0,
+                    text="Да.",
+                ),
+                TranscribedSegment(
+                    speaker="Вячеслав Т.",
+                    start=200.4,
+                    end=203.0,
+                    text="Немножко расскажите, пожалуйста.",
+                ),
+            ]
+        )
+
+        self.assertEqual(segments[2].speaker, "Ольга")
 
     def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -26,6 +27,11 @@ REVIEW_NAME_PREFIXES = (
     "та же ",
     "same ",
     "also ",
+)
+
+SHORT_REPLY_RE = re.compile(
+    r"^(?:да|нет|угу|ага|ок|окей|конечно|верно|точно|ну да)[.!?…]*$",
+    re.IGNORECASE,
 )
 
 
@@ -356,24 +362,11 @@ class TranscriberPipeline:
                 )
 
             # 3. Формирование результата
-            segments = []
-            seen_names = set()
-            for seg in result["segments"]:
-                speaker_raw = seg.get("speaker")
-                speaker = None
-                if speaker_raw:
-                    identification = mapping.get(str(speaker_raw))
-                    speaker = identification.name if identification else str(speaker_raw)
-                    seen_names.add(speaker)
-
-                segments.append(
-                    TranscribedSegment(
-                        speaker=speaker,
-                        start=seg["start"],
-                        end=seg["end"],
-                        text=seg["text"].strip(),
-                    )
-                )
+            segments = self._build_transcribed_segments(result["segments"], mapping)
+            segments = self._repair_short_replies(segments)
+            seen_names = {
+                segment.speaker for segment in segments if segment.speaker is not None
+            }
 
             logger.info(
                 "Transcription complete: %d segments, %d speakers",
@@ -381,6 +374,159 @@ class TranscriberPipeline:
                 len(seen_names),
             )
             return segments
+
+    def _build_transcribed_segments(
+        self,
+        result_segments: list[dict[str, Any]],
+        mapping: dict[str, IdentificationResult],
+    ) -> list[TranscribedSegment]:
+        segments: list[TranscribedSegment] = []
+        for segment in result_segments:
+            split_segments = self._split_segment_by_word_speakers(segment, mapping)
+            if split_segments:
+                segments.extend(split_segments)
+                continue
+
+            segments.append(
+                TranscribedSegment(
+                    speaker=self._map_speaker_name(segment.get("speaker"), mapping),
+                    start=float(segment["start"]),
+                    end=float(segment["end"]),
+                    text=str(segment.get("text", "")).strip(),
+                )
+            )
+        return [segment for segment in segments if segment.text]
+
+    def _split_segment_by_word_speakers(
+        self,
+        segment: dict[str, Any],
+        mapping: dict[str, IdentificationResult],
+    ) -> list[TranscribedSegment]:
+        words = segment.get("words") or []
+        if not words:
+            return []
+
+        if sum(1 for word in words if word.get("speaker")) <= 1:
+            return []
+
+        chunks: list[dict[str, Any]] = []
+        current_chunk: dict[str, Any] | None = None
+        fallback_speaker = self._map_speaker_name(segment.get("speaker"), mapping)
+
+        for word in words:
+            text = str(word.get("word", "")).strip()
+            if not text:
+                continue
+
+            speaker = self._map_speaker_name(word.get("speaker"), mapping) or fallback_speaker
+            start = float(word.get("start", segment["start"]))
+            end = float(word.get("end", start))
+            if current_chunk is None or current_chunk["speaker"] != speaker:
+                current_chunk = {
+                    "speaker": speaker,
+                    "start": start,
+                    "end": end,
+                    "words": [],
+                }
+                chunks.append(current_chunk)
+
+            current_chunk["words"].append(text)
+            current_chunk["end"] = end
+
+        if len(chunks) <= 1:
+            return []
+
+        return [
+            TranscribedSegment(
+                speaker=chunk["speaker"],
+                start=float(chunk["start"]),
+                end=float(chunk["end"]),
+                text=self._join_word_text(chunk["words"]),
+            )
+            for chunk in chunks
+            if chunk["words"]
+        ]
+
+    def _repair_short_replies(
+        self,
+        segments: list[TranscribedSegment],
+        max_lookback_seconds: float = 45.0,
+    ) -> list[TranscribedSegment]:
+        repaired = list(segments)
+        for index, segment in enumerate(repaired):
+            if index == 0 or index + 1 >= len(repaired):
+                continue
+            if not segment.speaker or not self._is_short_reply(segment.text):
+                continue
+
+            previous_segment = repaired[index - 1]
+            next_segment = repaired[index + 1]
+            if previous_segment.speaker != segment.speaker:
+                continue
+            if next_segment.speaker != segment.speaker:
+                continue
+            if not previous_segment.text.strip().endswith("?"):
+                continue
+
+            alternative_speaker = self._find_recent_alternative_speaker(
+                repaired,
+                index - 1,
+                segment.speaker,
+                max_lookback_seconds=max_lookback_seconds,
+            )
+            if alternative_speaker is None:
+                continue
+
+            logger.info(
+                "Reassigned short reply %.2f-%.2f from %s to %s: %s",
+                segment.start,
+                segment.end,
+                segment.speaker,
+                alternative_speaker,
+                segment.text,
+            )
+            repaired[index] = TranscribedSegment(
+                speaker=alternative_speaker,
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+            )
+        return repaired
+
+    def _find_recent_alternative_speaker(
+        self,
+        segments: list[TranscribedSegment],
+        start_index: int,
+        current_speaker: str,
+        max_lookback_seconds: float,
+    ) -> str | None:
+        reference_start = segments[start_index].start
+        for index in range(start_index - 1, -1, -1):
+            segment = segments[index]
+            if reference_start - segment.end > max_lookback_seconds:
+                break
+            if segment.speaker and segment.speaker != current_speaker:
+                return segment.speaker
+        return None
+
+    def _is_short_reply(self, text: str) -> bool:
+        normalized = " ".join(str(text).strip().split())
+        return bool(SHORT_REPLY_RE.match(normalized))
+
+    def _map_speaker_name(
+        self,
+        speaker_raw,
+        mapping: dict[str, IdentificationResult],
+    ) -> str | None:
+        if not speaker_raw:
+            return None
+        speaker_label = str(speaker_raw)
+        identification = mapping.get(speaker_label)
+        return identification.name if identification else speaker_label
+
+    def _join_word_text(self, words: list[str]) -> str:
+        text = " ".join(word.strip() for word in words if word.strip())
+        return re.sub(r"\s+([,.;:!?…])", r"\1", text).strip()
 
     def _run_diarization(
         self,
