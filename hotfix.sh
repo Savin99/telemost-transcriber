@@ -25,8 +25,9 @@ fi
 
 # Извлекаем параметры SSH для rsync
 # VAST_SSH="ssh -p 12345 root@1.2.3.4" → SSH_OPTS="-e 'ssh -p 12345'" REMOTE_HOST="root@1.2.3.4"
-SSH_PORT=$(echo "$VAST_SSH" | grep -oP '(?<=-p\s)\d+' || echo "22")
-REMOTE_HOST=$(echo "$VAST_SSH" | grep -oP '\S+@\S+$')
+SSH_PORT=$(printf '%s\n' "$VAST_SSH" | awk '{for (i = 1; i <= NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
+SSH_PORT=${SSH_PORT:-22}
+REMOTE_HOST=$(printf '%s\n' "$VAST_SSH" | awk '{print $NF}')
 RSYNC_SSH="ssh -p $SSH_PORT"
 
 REMOTE_APP="/workspace/telemost-transcriber"
@@ -55,7 +56,7 @@ sync_and_restart_bot() {
     log "Синк bot-service..."
     rsync $RSYNC_OPTS -e "$RSYNC_SSH" "$SCRIPT_DIR/bot-service/" "$REMOTE_HOST:$REMOTE_APP/bot-service/"
     log "Рестарт bot-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then echo 'bot-service skipped: TELEMOST_SERVICE_API_KEY is not set'; exit 1; fi; mkdir -p /workspace/recordings $REMOTE_LOGS; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:///\/workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" TELEMOST_SERVICE_API_KEY=\"\${TELEMOST_SERVICE_API_KEY}\" GDRIVE_FOLDER_ID=\"\${GDRIVE_FOLDER_ID:-}\" GDRIVE_CLIENT_SECRET=\"\${GDRIVE_CLIENT_SECRET:-}\" GDRIVE_TOKEN_PATH=\"\${GDRIVE_TOKEN_PATH:-}\" MEETING_METADATA_LLM_ENABLED=\"\${MEETING_METADATA_LLM_ENABLED:-false}\" ANTHROPIC_API_KEY=\"\${ANTHROPIC_API_KEY:-}\" MEETING_METADATA_RULES_JSON=\"\${MEETING_METADATA_RULES_JSON:-}\" MEETING_METADATA_RULES_PATH=\"\${MEETING_METADATA_RULES_PATH:-}\" MEETING_METADATA_EXECUTOR_MODEL=\"\${MEETING_METADATA_EXECUTOR_MODEL:-claude-sonnet-4-6}\" MEETING_METADATA_ADVISOR_MODEL=\"\${MEETING_METADATA_ADVISOR_MODEL:-claude-opus-4-6}\" MEETING_METADATA_ADVISOR_ENABLED=\"\${MEETING_METADATA_ADVISOR_ENABLED:-true}\" MEETING_METADATA_ADVISOR_MAX_USES=\"\${MEETING_METADATA_ADVISOR_MAX_USES:-2}\" MEETING_METADATA_TIMEOUT_SEC=\"\${MEETING_METADATA_TIMEOUT_SEC:-120}\" MEETING_METADATA_MAX_TOKENS=\"\${MEETING_METADATA_MAX_TOKENS:-1024}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null &" 2>/dev/null
+    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then echo 'bot-service skipped: TELEMOST_SERVICE_API_KEY is not set'; exit 1; fi; mkdir -p /workspace/recordings $REMOTE_LOGS; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:////workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" TELEMOST_SERVICE_API_KEY=\"\${TELEMOST_SERVICE_API_KEY}\" GDRIVE_FOLDER_ID=\"\${GDRIVE_FOLDER_ID:-}\" GDRIVE_CLIENT_SECRET=\"\${GDRIVE_CLIENT_SECRET:-}\" GDRIVE_TOKEN_PATH=\"\${GDRIVE_TOKEN_PATH:-}\" MEETING_METADATA_LLM_ENABLED=\"\${MEETING_METADATA_LLM_ENABLED:-false}\" ANTHROPIC_API_KEY=\"\${ANTHROPIC_API_KEY:-}\" MEETING_METADATA_RULES_JSON=\"\${MEETING_METADATA_RULES_JSON:-}\" MEETING_METADATA_RULES_PATH=\"\${MEETING_METADATA_RULES_PATH:-}\" MEETING_METADATA_EXECUTOR_MODEL=\"\${MEETING_METADATA_EXECUTOR_MODEL:-claude-sonnet-4-6}\" MEETING_METADATA_ADVISOR_MODEL=\"\${MEETING_METADATA_ADVISOR_MODEL:-claude-opus-4-6}\" MEETING_METADATA_ADVISOR_ENABLED=\"\${MEETING_METADATA_ADVISOR_ENABLED:-true}\" MEETING_METADATA_ADVISOR_MAX_USES=\"\${MEETING_METADATA_ADVISOR_MAX_USES:-2}\" MEETING_METADATA_TIMEOUT_SEC=\"\${MEETING_METADATA_TIMEOUT_SEC:-120}\" MEETING_METADATA_MAX_TOKENS=\"\${MEETING_METADATA_MAX_TOKENS:-1024}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null &" 2>/dev/null
     log "bot-service обновлён"
 }
 
