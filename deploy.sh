@@ -77,7 +77,7 @@ restart_tg() {
 
 restart_bot() {
     log "Рестарт bot-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:///\/workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null & echo 'bot-service PID: '\$!" 2>/dev/null
+    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then echo 'bot-service skipped: TELEMOST_SERVICE_API_KEY is not set'; exit 1; fi; mkdir -p /workspace/recordings $REMOTE_LOGS; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:///\/workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" TELEMOST_SERVICE_API_KEY=\"\${TELEMOST_SERVICE_API_KEY}\" GDRIVE_FOLDER_ID=\"\${GDRIVE_FOLDER_ID:-}\" GDRIVE_CLIENT_SECRET=\"\${GDRIVE_CLIENT_SECRET:-}\" GDRIVE_TOKEN_PATH=\"\${GDRIVE_TOKEN_PATH:-}\" MEETING_METADATA_LLM_ENABLED=\"\${MEETING_METADATA_LLM_ENABLED:-false}\" ANTHROPIC_API_KEY=\"\${ANTHROPIC_API_KEY:-}\" MEETING_METADATA_RULES_JSON=\"\${MEETING_METADATA_RULES_JSON:-}\" MEETING_METADATA_RULES_PATH=\"\${MEETING_METADATA_RULES_PATH:-}\" MEETING_METADATA_EXECUTOR_MODEL=\"\${MEETING_METADATA_EXECUTOR_MODEL:-claude-sonnet-4-6}\" MEETING_METADATA_ADVISOR_MODEL=\"\${MEETING_METADATA_ADVISOR_MODEL:-claude-opus-4-6}\" MEETING_METADATA_ADVISOR_ENABLED=\"\${MEETING_METADATA_ADVISOR_ENABLED:-true}\" MEETING_METADATA_ADVISOR_MAX_USES=\"\${MEETING_METADATA_ADVISOR_MAX_USES:-2}\" MEETING_METADATA_TIMEOUT_SEC=\"\${MEETING_METADATA_TIMEOUT_SEC:-120}\" MEETING_METADATA_MAX_TOKENS=\"\${MEETING_METADATA_MAX_TOKENS:-1024}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null & echo 'bot-service PID: '\$!" 2>/dev/null
 }
 
 restart_transcriber() {
@@ -105,6 +105,6 @@ esac
 # --- 4. Проверка ---
 sleep 2
 log "Проверка health..."
-$VAST_SSH "curl -s http://localhost:8000/health 2>/dev/null && echo '' || echo 'bot-service: не отвечает'; curl -s http://localhost:8001/health 2>/dev/null && echo '' || echo 'transcriber: не отвечает'" 2>/dev/null
+$VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -n \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then curl -s -H \"X-API-Key: \${TELEMOST_SERVICE_API_KEY}\" http://localhost:8000/health 2>/dev/null && echo '' || echo 'bot-service: не отвечает'; else echo 'bot-service: TELEMOST_SERVICE_API_KEY is not set'; fi; curl -s http://localhost:8001/health 2>/dev/null && echo '' || echo 'transcriber: не отвечает'" 2>/dev/null
 
 log "Готово! 🚀"

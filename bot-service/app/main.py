@@ -1,10 +1,15 @@
 import asyncio
+import importlib
 import logging
 import os
+import secrets
+import sys
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +23,7 @@ from .database import (
     update_meeting_status,
 )
 from .models import (
+    DriveFileInfo,
     HealthResponse,
     JoinRequest,
     MeetingStatus,
@@ -38,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://transcriber:8001")
 RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
+API_KEY_HEADER = "X-API-Key"
+LEGACY_STATUS_ALIASES = {"joining": "pending"}
+DEFAULT_UNKNOWN_SPEAKER = "Unknown Speaker 1"
 
 # Активные сессии:
 # meeting_id -> {
@@ -45,13 +54,164 @@ RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
 #   "session": TelemostSession | None,
 #   "capture": AudioCapture | None,
 #   "stop_requested": bool,
+#   "stop_before_recording": bool,
 #   "recording_started": bool,
 # }
 active_sessions: dict[str, dict] = {}
 
 
+def _load_service_api_key() -> str:
+    api_key = os.getenv("TELEMOST_SERVICE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("TELEMOST_SERVICE_API_KEY must be set")
+    return api_key
+
+
+async def require_api_key(
+    x_api_key: str | None = Header(default=None, alias=API_KEY_HEADER),
+):
+    expected_api_key = getattr(app.state, "service_api_key", None) or _load_service_api_key()
+    if not x_api_key or not secrets.compare_digest(x_api_key, expected_api_key):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _normalize_status(status: str | None) -> str:
+    if not status:
+        return "pending"
+    return LEGACY_STATUS_ALIASES.get(status, status)
+
+
+def _format_timestamp(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc)
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        normalized = raw.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+        except ValueError:
+            return raw
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _build_meeting_status(
+    meeting: Meeting,
+    *,
+    duration_seconds: float | None = None,
+) -> MeetingStatus:
+    normalized_status = _normalize_status(meeting.status)
+    drive_file = _build_drive_file(meeting) if normalized_status == "done" else None
+    return MeetingStatus(
+        meeting_id=meeting.id,
+        status=normalized_status,
+        meeting_url=meeting.meeting_url,
+        duration_seconds=duration_seconds
+        if duration_seconds is not None
+        else meeting.duration_seconds,
+        error_message=meeting.error_message if normalized_status == "error" else None,
+        created_at=_format_timestamp(meeting.created_at),
+        transcript_url=meeting.transcript_url if normalized_status == "done" else None,
+        drive_file=drive_file,
+    )
+
+
+def _normalize_transcript_segments(segments: list[dict]) -> list[dict]:
+    normalized_segments: list[dict] = []
+    missing_speaker_name = DEFAULT_UNKNOWN_SPEAKER
+    for segment in segments:
+        speaker = str(segment.get("speaker") or "").strip() or missing_speaker_name
+        normalized_segments.append(
+            {
+                "speaker": speaker,
+                "start": float(segment["start"]),
+                "end": float(segment["end"]),
+                "text": str(segment["text"]),
+            }
+        )
+    return normalized_segments
+
+
+def _build_drive_file(meeting: Meeting) -> DriveFileInfo | None:
+    if not (
+        meeting.drive_file_id
+        and meeting.drive_folder_id
+        and meeting.drive_filename
+        and meeting.drive_web_view_link
+    ):
+        return None
+    return DriveFileInfo(
+        file_id=str(meeting.drive_file_id),
+        folder_id=str(meeting.drive_folder_id),
+        filename=str(meeting.drive_filename),
+        web_view_link=str(meeting.drive_web_view_link),
+    )
+
+
+def _build_transcript_payload(
+    *,
+    meeting_id: str,
+    meeting_url: str,
+    duration_seconds: float | None,
+    segments: list[dict],
+) -> dict:
+    effective_duration = duration_seconds
+    if effective_duration is None and segments:
+        effective_duration = float(segments[-1]["end"])
+    return {
+        "meeting_id": meeting_id,
+        "meeting_url": meeting_url,
+        "duration_seconds": effective_duration,
+        "segments": segments,
+    }
+
+
+def _load_tg_bot_module(module_name: str):
+    tg_bot_dir = Path(__file__).resolve().parents[2] / "tg-bot"
+    tg_bot_dir_str = str(tg_bot_dir)
+    if tg_bot_dir_str not in sys.path:
+        sys.path.insert(0, tg_bot_dir_str)
+    return importlib.import_module(module_name)
+
+
+def _upload_transcript_to_drive_sync(
+    transcript: dict,
+    *,
+    source_filename: str | None = None,
+) -> dict[str, str]:
+    gdrive_module = _load_tg_bot_module("gdrive")
+    result = gdrive_module.upload_transcript_md(
+        transcript=transcript,
+        source_filename=source_filename,
+    )
+    required_keys = ("file_id", "folder_id", "filename", "web_view_link")
+    if not isinstance(result, dict) or any(not result.get(key) for key in required_keys):
+        raise RuntimeError("Google Drive upload failed or returned incomplete metadata")
+    return {key: str(result[key]) for key in required_keys}
+
+
+async def _upload_transcript_to_drive(
+    transcript: dict,
+    *,
+    source_filename: str | None = None,
+) -> dict[str, str]:
+    return await asyncio.to_thread(
+        _upload_transcript_to_drive_sync,
+        transcript,
+        source_filename=source_filename,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.service_api_key = _load_service_api_key()
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     await init_db()
     yield
@@ -60,7 +220,11 @@ async def lifespan(app: FastAPI):
         await _stop_session(meeting_id)
 
 
-app = FastAPI(title="Telemost Bot", lifespan=lifespan)
+app = FastAPI(
+    title="Telemost Bot",
+    lifespan=lifespan,
+    dependencies=[Depends(require_api_key)],
+)
 
 
 async def _bot_workflow(
@@ -86,10 +250,11 @@ async def _bot_workflow(
             await telemost.join()
             info = active_sessions.get(meeting_id)
             if info and info.get("stop_requested"):
+                info["stop_before_recording"] = True
                 raise asyncio.CancelledError
 
             # 2. Запуск записи (PulseAudio per-session sink + FFmpeg)
-            await update_meeting_status(session, meeting_id, "recording")
+            await update_meeting_status(session, meeting_id, "recording", error_message=None)
             await capture.start()
             info = active_sessions.get(meeting_id)
             if info:
@@ -111,34 +276,58 @@ async def _bot_workflow(
                 "leaving",
                 recording_path=recording_path,
                 duration_seconds=duration,
+                error_message=None,
             )
 
             # 5. Закрытие браузера
             await telemost.leave()
 
             # 6. Отправка на транскрипцию
-            await update_meeting_status(session, meeting_id, "transcribing")
-            segments = await _transcribe(recording_path, num_speakers=num_speakers)
+            await update_meeting_status(session, meeting_id, "transcribing", error_message=None)
+            segments = _normalize_transcript_segments(
+                await _transcribe(recording_path, num_speakers=num_speakers)
+            )
+            transcript_payload = _build_transcript_payload(
+                meeting_id=meeting_id,
+                meeting_url=meeting_url,
+                duration_seconds=duration,
+                segments=segments,
+            )
+            drive_file = await _upload_transcript_to_drive(
+                transcript_payload,
+                source_filename=os.path.basename(recording_path),
+            )
 
             # 7. Сохранение результатов
             for seg in segments:
                 db_segment = TranscriptSegmentDB(
                     meeting_id=meeting_id,
-                    speaker=seg.get("speaker"),
-                    start_time=float(seg["start"]),
-                    end_time=float(seg["end"]),
-                    text=str(seg["text"]),
+                    speaker=seg["speaker"],
+                    start_time=seg["start"],
+                    end_time=seg["end"],
+                    text=seg["text"],
                 )
                 session.add(db_segment)
+            meeting = await _get_meeting_or_404(session, meeting_id)
+            meeting.status = "done"
+            meeting.duration_seconds = transcript_payload["duration_seconds"]
+            meeting.error_message = None
+            meeting.transcript_url = drive_file["web_view_link"]
+            meeting.drive_file_id = drive_file["file_id"]
+            meeting.drive_folder_id = drive_file["folder_id"]
+            meeting.drive_filename = drive_file["filename"]
+            meeting.drive_web_view_link = drive_file["web_view_link"]
             await session.commit()
-
-            await update_meeting_status(session, meeting_id, "done")
             logger.info("Meeting %s processed successfully", meeting_id)
 
         except asyncio.CancelledError:
             logger.info("Meeting %s was stopped before recording pipeline finished", meeting_id)
             await session.rollback()
 
+            info = active_sessions.get(meeting_id) or {}
+            had_recording = bool(info.get("recording_started"))
+            if not had_recording and capture and capture.duration_seconds is not None:
+                had_recording = True
             duration = None
             if capture:
                 with suppress(Exception):
@@ -151,10 +340,19 @@ async def _bot_workflow(
                 await update_meeting_status(
                     cancel_session,
                     meeting_id,
-                    "done",
+                    "error",
                     recording_path=recording_path,
                     duration_seconds=duration,
-                    error_message=None,
+                    transcript_url=None,
+                    drive_file_id=None,
+                    drive_folder_id=None,
+                    drive_filename=None,
+                    drive_web_view_link=None,
+                    error_message=(
+                        "Meeting was stopped before recording started"
+                        if info.get("stop_before_recording") or not had_recording
+                        else "Meeting processing was interrupted before transcript was ready"
+                    ),
                 )
         except Exception as e:
             logger.exception("Error processing meeting %s", meeting_id)
@@ -167,7 +365,15 @@ async def _bot_workflow(
                     await telemost.leave()
             async with async_session() as err_session:
                 await update_meeting_status(
-                    err_session, meeting_id, "error", error_message=str(e)
+                    err_session,
+                    meeting_id,
+                    "error",
+                    transcript_url=None,
+                    drive_file_id=None,
+                    drive_folder_id=None,
+                    drive_filename=None,
+                    drive_web_view_link=None,
+                    error_message=str(e),
                 )
         finally:
             info = active_sessions.get(meeting_id)
@@ -207,6 +413,7 @@ async def _stop_session(meeting_id: str):
         return
 
     info["stop_requested"] = True
+    info["stop_before_recording"] = not bool(info.get("recording_started"))
     capture: AudioCapture | None = info.get("capture")
     telemost: TelemostSession | None = info.get("session")
     task: asyncio.Task | None = info.get("task")
@@ -225,7 +432,7 @@ async def _stop_session(meeting_id: str):
     return duration
 
 
-@app.post("/join", response_model=MeetingStatus)
+@app.post("/join", response_model=MeetingStatus, response_model_exclude_none=True)
 async def join_meeting(
     request: JoinRequest,
     session: AsyncSession = Depends(get_session),
@@ -234,6 +441,7 @@ async def join_meeting(
     meeting = Meeting(
         meeting_url=request.meeting_url,
         bot_name=request.bot_name,
+        status="pending",
     )
     session.add(meeting)
     await session.commit()
@@ -246,6 +454,7 @@ async def join_meeting(
         "session": None,
         "capture": None,
         "stop_requested": False,
+        "stop_before_recording": False,
         "recording_started": False,
     }
 
@@ -255,12 +464,7 @@ async def join_meeting(
     )
     active_sessions[meeting_id]["task"] = task
 
-    return MeetingStatus(
-        meeting_id=meeting.id,
-        status=meeting.status,
-        meeting_url=meeting.meeting_url,
-        created_at=meeting.created_at,
-    )
+    return _build_meeting_status(meeting)
 
 
 @app.post("/leave/{meeting_id}", response_model=MeetingStatus)
@@ -270,12 +474,16 @@ async def leave_meeting(
 ):
     """Отключить бота от встречи и запустить транскрипцию."""
     meeting = await _get_meeting_or_404(session, meeting_id)
+    current_status = _normalize_status(meeting.status)
 
-    if meeting_id not in active_sessions:
-        raise HTTPException(status_code=400, detail="Bot is not active for this meeting")
+    if current_status in {"leaving", "transcribing", "done", "error"}:
+        return _build_meeting_status(meeting)
 
     # Отмечаем stop всегда; дальнейшая логика зависит от стадии запуска.
-    info = active_sessions.get(meeting_id, {})
+    info = active_sessions.get(meeting_id)
+    if not info:
+        return _build_meeting_status(meeting)
+
     info["stop_requested"] = True
     task: asyncio.Task | None = info.get("task")
     recording_started = bool(info.get("recording_started"))
@@ -286,16 +494,13 @@ async def leave_meeting(
         telemost._meeting_ended.set()
     # Если запись ещё не стартовала — отменяем задачу сразу.
     elif task and not task.done():
+        info["stop_before_recording"] = True
         task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
     await session.refresh(meeting)
-    return MeetingStatus(
-        meeting_id=meeting.id,
-        status=meeting.status,
-        meeting_url=meeting.meeting_url,
-        duration_seconds=meeting.duration_seconds,
-        created_at=meeting.created_at,
-    )
+    return _build_meeting_status(meeting)
 
 
 @app.get("/status/{meeting_id}", response_model=MeetingStatus)
@@ -313,14 +518,7 @@ async def get_status(
         if capture and capture.duration_seconds:
             duration = capture.duration_seconds
 
-    return MeetingStatus(
-        meeting_id=meeting.id,
-        status=meeting.status,
-        meeting_url=meeting.meeting_url,
-        duration_seconds=duration,
-        error_message=meeting.error_message,
-        created_at=meeting.created_at,
-    )
+    return _build_meeting_status(meeting, duration_seconds=duration)
 
 
 @app.get("/transcripts/{meeting_id}", response_model=TranscriptResponse)
@@ -330,6 +528,11 @@ async def get_transcript(
 ):
     """Получить транскрипт встречи."""
     meeting = await _get_meeting_or_404(session, meeting_id)
+    if _normalize_status(meeting.status) != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Transcript is not ready; current status is {_normalize_status(meeting.status)}",
+        )
 
     result = await session.execute(
         select(TranscriptSegmentDB)
@@ -337,14 +540,19 @@ async def get_transcript(
         .order_by(TranscriptSegmentDB.start_time)
     )
     segments = result.scalars().all()
+    drive_file = _build_drive_file(meeting)
+    if not meeting.transcript_url or not drive_file:
+        raise HTTPException(status_code=500, detail="Transcript Drive upload metadata is missing")
 
     return TranscriptResponse(
         meeting_id=meeting.id,
         meeting_url=meeting.meeting_url,
         duration_seconds=meeting.duration_seconds,
+        transcript_url=meeting.transcript_url,
+        drive_file=drive_file,
         segments=[
             TranscriptSegment(
-                speaker=seg.speaker,
+                speaker=str(seg.speaker or DEFAULT_UNKNOWN_SPEAKER),
                 start=seg.start_time,
                 end=seg.end_time,
                 text=seg.text,
@@ -363,20 +571,16 @@ async def list_meetings(
     limit = max(1, min(limit, 50))
     query = select(Meeting).order_by(Meeting.created_at.desc()).limit(limit)
     if status:
-        query = query.where(Meeting.status == status)
+        if status == "pending":
+            query = query.where(Meeting.status.in_(["pending", "joining"]))
+        else:
+            query = query.where(Meeting.status == status)
 
     result = await session.execute(query)
     meetings = result.scalars().all()
 
     return [
-        MeetingStatus(
-            meeting_id=meeting.id,
-            status=meeting.status,
-            meeting_url=meeting.meeting_url,
-            duration_seconds=meeting.duration_seconds,
-            error_message=meeting.error_message,
-            created_at=meeting.created_at,
-        )
+        _build_meeting_status(meeting)
         for meeting in meetings
     ]
 

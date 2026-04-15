@@ -3,5 +3,9 @@ uvicorn[standard]==0.34.*
 playwright==1.52.*
 sqlalchemy[asyncio]==2.0.*
 aiosqlite>=0.20
+asyncpg>=0.30
 httpx==0.28.*
 pydantic==2.11.*
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1

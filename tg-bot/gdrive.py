@@ -28,6 +28,21 @@ GDRIVE_CLIENT_SECRET = os.getenv("GDRIVE_CLIENT_SECRET", "/app/credentials/clien
 GDRIVE_TOKEN_PATH = os.getenv("GDRIVE_TOKEN_PATH", "/app/credentials/gdrive_token.json")
 
 
+def _build_upload_result(
+    *,
+    file_id: str,
+    folder_id: str,
+    filename: str,
+    web_view_link: str,
+) -> dict[str, str]:
+    return {
+        "file_id": file_id,
+        "folder_id": folder_id,
+        "filename": filename,
+        "web_view_link": web_view_link,
+    }
+
+
 def _get_credentials() -> Credentials | None:
     """Получить OAuth2 credentials (из сохранённого токена или через авторизацию)."""
     creds = None
@@ -178,11 +193,11 @@ def upload_transcript_md(
     filename: str | None = None,
     source_filename: str | None = None,
     service=None,
-) -> str | None:
+) -> dict[str, str] | None:
     """Загрузить транскрипт как .md файл на Google Drive.
 
     Returns:
-        URL файла на Google Drive или None при ошибке.
+        Drive upload metadata or None при ошибке.
     """
     service = service or _get_drive_service()
     if not service:
@@ -224,14 +239,21 @@ def upload_transcript_md(
             fields="id, webViewLink",
         ).execute()
 
-        link = file.get("webViewLink")
+        link = str(file.get("webViewLink") or "")
+        file_id = str(file.get("id") or "")
+        result = _build_upload_result(
+            file_id=file_id,
+            folder_id=parent_folder_id,
+            filename=file_metadata["name"],
+            web_view_link=link,
+        )
         logger.info(
             "Transcript uploaded to Google Drive: %s (%s/%s)",
             link,
             " / ".join(metadata.folder_path),
             file_metadata["name"],
         )
-        return link
+        return result
 
     except Exception as e:
         logger.exception("Failed to upload transcript to Google Drive: %s", e)

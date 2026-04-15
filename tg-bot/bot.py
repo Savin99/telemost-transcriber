@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 TG_TOKEN = os.environ["TG_BOT_TOKEN"]
 BOT_API = os.getenv("BOT_API_URL", "http://localhost:8000")
+BOT_API_KEY = os.getenv("BOT_API_KEY") or os.getenv("TELEMOST_SERVICE_API_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 VOICE_REVIEW_SAMPLE_COUNT = int(os.getenv("VOICE_REVIEW_SAMPLE_COUNT", "2"))
 VOICE_REVIEW_SAMPLE_MAX_SECONDS = float(os.getenv("VOICE_REVIEW_SAMPLE_MAX_SECONDS", "10"))
@@ -45,6 +46,12 @@ pending_reviews: dict[int, dict] = {}
 
 def _safe_html(value: object) -> str:
     return html.escape(str(value), quote=False)
+
+
+def _bot_api_headers() -> dict[str, str]:
+    if not BOT_API_KEY:
+        return {}
+    return {"X-API-Key": BOT_API_KEY}
 
 
 @dp.message(Command("start", "help"))
@@ -91,7 +98,10 @@ async def cmd_stop(msg: Message):
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            resp = await client.post(f"{BOT_API}/leave/{meeting_id}")
+            resp = await client.post(
+                f"{BOT_API}/leave/{meeting_id}",
+                headers=_bot_api_headers(),
+            )
             resp.raise_for_status()
         except Exception as e:
             await status_msg.edit_text(f"Ошибка: {_safe_html(e)}")
@@ -116,7 +126,10 @@ async def cmd_status(msg: Message):
 
     async with httpx.AsyncClient(timeout=10) as client:
         try:
-            resp = await client.get(f"{BOT_API}/status/{session['meeting_id']}")
+            resp = await client.get(
+                f"{BOT_API}/status/{session['meeting_id']}",
+                headers=_bot_api_headers(),
+            )
             data = resp.json()
             status = data["status"]
             duration = data.get("duration_seconds")
@@ -141,6 +154,7 @@ async def cmd_voices(msg: Message, command: CommandObject):
             response = await client.get(
                 f"{BOT_API}/meetings",
                 params={"status": "done", "limit": 5},
+                headers=_bot_api_headers(),
             )
             response.raise_for_status()
             meetings = response.json()
@@ -228,6 +242,7 @@ async def handle_pending_voice_label(msg: Message):
                 f"{BOT_API}/meetings/{state['meeting_id']}/speaker-review/"
                 f"{state['meeting_key']}/{current['speaker_label']}/label",
                 json={"name": text},
+                headers=_bot_api_headers(),
             )
             response.raise_for_status()
             data = response.json()
@@ -282,6 +297,7 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
             resp = await client.post(
                 f"{BOT_API}/join",
                 json=payload,
+                headers=_bot_api_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
@@ -314,7 +330,10 @@ async def _auto_wait(chat_id: int, meeting_id: str):
                 return
 
             try:
-                resp = await client.get(f"{BOT_API}/status/{meeting_id}")
+                resp = await client.get(
+                    f"{BOT_API}/status/{meeting_id}",
+                    headers=_bot_api_headers(),
+                )
                 data = resp.json()
                 status = data["status"]
             except Exception:
@@ -323,7 +342,10 @@ async def _auto_wait(chat_id: int, meeting_id: str):
             if status == "done":
                 active.pop(chat_id, None)
                 try:
-                    resp = await client.get(f"{BOT_API}/transcripts/{meeting_id}")
+                    resp = await client.get(
+                        f"{BOT_API}/transcripts/{meeting_id}",
+                        headers=_bot_api_headers(),
+                    )
                     await _send_transcript(chat_id, resp.json())
                 except Exception as e:
                     await bot.send_message(
@@ -344,13 +366,19 @@ async def _wait_and_get_transcript(meeting_id: str) -> dict | None:
         for _ in range(120):  # Макс ~20 минут
             await asyncio.sleep(POLL_INTERVAL)
             try:
-                resp = await client.get(f"{BOT_API}/status/{meeting_id}")
+                resp = await client.get(
+                    f"{BOT_API}/status/{meeting_id}",
+                    headers=_bot_api_headers(),
+                )
                 data = resp.json()
             except Exception:
                 continue
 
             if data["status"] == "done":
-                resp = await client.get(f"{BOT_API}/transcripts/{meeting_id}")
+                resp = await client.get(
+                    f"{BOT_API}/transcripts/{meeting_id}",
+                    headers=_bot_api_headers(),
+                )
                 return resp.json()
 
             if data["status"] == "error":
@@ -399,6 +427,7 @@ async def _start_speaker_review(chat_id: int, meeting_id: str, quiet: bool = Fal
                     "samples_per_speaker": VOICE_REVIEW_SAMPLE_COUNT,
                     "sample_max_seconds": VOICE_REVIEW_SAMPLE_MAX_SECONDS,
                 },
+                headers=_bot_api_headers(),
             )
             response.raise_for_status()
             review = response.json()
@@ -476,7 +505,8 @@ async def _send_next_review_item(chat_id: int):
             try:
                 response = await client.get(
                     f"{BOT_API}/meetings/{state['meeting_id']}/speaker-review/"
-                    f"{state['meeting_key']}/{speaker_label}/samples/{sample_index}"
+                    f"{state['meeting_key']}/{speaker_label}/samples/{sample_index}",
+                    headers=_bot_api_headers(),
                 )
                 response.raise_for_status()
             except Exception as e:
@@ -559,9 +589,9 @@ async def _send_transcript(chat_id: int, transcript: dict):
         await bot.send_document(chat_id, file)
 
     # Сохранить MD на Google Drive
-    gdrive_link = upload_transcript_md(transcript)
-    if gdrive_link:
-        safe_link = html.escape(gdrive_link, quote=True)
+    drive_file = upload_transcript_md(transcript)
+    if drive_file and drive_file.get("web_view_link"):
+        safe_link = html.escape(drive_file["web_view_link"], quote=True)
         await bot.send_message(
             chat_id, f"📁 <a href=\"{safe_link}\">Транскрипт на Google Drive</a>"
         )

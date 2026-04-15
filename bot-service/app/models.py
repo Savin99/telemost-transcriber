@@ -1,6 +1,15 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
+
+MeetingLifecycleStatus = Literal[
+    "pending",
+    "recording",
+    "leaving",
+    "transcribing",
+    "done",
+    "error",
+]
 
 
 class JoinRequest(BaseModel):
@@ -9,17 +18,26 @@ class JoinRequest(BaseModel):
     num_speakers: Optional[int] = None
 
 
+class DriveFileInfo(BaseModel):
+    file_id: str
+    folder_id: str
+    filename: str
+    web_view_link: str
+
+
 class MeetingStatus(BaseModel):
     meeting_id: str
-    status: str
+    status: MeetingLifecycleStatus
     meeting_url: str
     duration_seconds: Optional[float] = None
     error_message: Optional[str] = None
     created_at: Optional[str] = None
+    transcript_url: Optional[str] = None
+    drive_file: Optional[DriveFileInfo] = None
 
 
 class TranscriptSegment(BaseModel):
-    speaker: Optional[str] = None
+    speaker: str
     start: float
     end: float
     text: str
@@ -29,6 +47,8 @@ class TranscriptResponse(BaseModel):
     meeting_id: str
     meeting_url: str
     duration_seconds: Optional[float] = None
+    transcript_url: str
+    drive_file: DriveFileInfo
     segments: list[TranscriptSegment]
 
 

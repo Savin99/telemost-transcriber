@@ -190,12 +190,16 @@ def process_file(service, file_info: dict):
         }
 
         # 4. Загрузить MD
-        link = upload_transcript_md(
+        drive_file = upload_transcript_md(
             transcript=transcript,
             source_filename=filename,
             service=service,
         )
-        logger.info("Uploaded transcript for %s -> %s", filename, link)
+        logger.info(
+            "Uploaded transcript for %s -> %s",
+            filename,
+            drive_file.get("web_view_link") if drive_file else None,
+        )
 
         # 5. Пометить оригинал
         mark_as_processed(service, file_id)
