@@ -86,6 +86,7 @@ class TranscriberPipeline:
         self._diarize_model = None
         self._speaker_identifier = None
         self._speaker_refiner = None
+        self._transcript_refiner = None
         self._voice_bank = None
         self.voice_match_threshold = float(os.getenv("VOICE_MATCH_THRESHOLD", "0.40"))
         self.min_embedding_segment_seconds = float(
@@ -95,6 +96,10 @@ class TranscriberPipeline:
         self.asr_language = None if asr_language in {"", "auto"} else asr_language
         self.speaker_llm_refinement_enabled = env_bool(
             "SPEAKER_LLM_REFINEMENT_ENABLED",
+            False,
+        )
+        self.transcript_llm_refinement_enabled = env_bool(
+            "TRANSCRIPT_LLM_REFINEMENT_ENABLED",
             False,
         )
 
@@ -146,6 +151,14 @@ class TranscriberPipeline:
 
             self._speaker_refiner = AnthropicAdvisorSpeakerRefiner.from_env()
         return self._speaker_refiner
+
+    @property
+    def transcript_refiner(self):
+        if self._transcript_refiner is None:
+            from .transcript_refiner import AnthropicAdvisorTranscriptRefiner
+
+            self._transcript_refiner = AnthropicAdvisorTranscriptRefiner.from_env()
+        return self._transcript_refiner
 
     @property
     def diarize_model(self):
@@ -382,6 +395,7 @@ class TranscriberPipeline:
             segments = self._build_transcribed_segments(result["segments"], mapping)
             segments = self._repair_short_replies(segments)
             segments = self._refine_speakers_with_llm(segments)
+            segments = self._refine_transcript_text_with_llm(segments)
             seen_names = {
                 segment.speaker for segment in segments if segment.speaker is not None
             }
@@ -403,6 +417,18 @@ class TranscriberPipeline:
             return self.speaker_refiner.refine(segments)
         except Exception as exc:
             logger.warning("Speaker LLM refinement failed: %s", exc)
+            return segments
+
+    def _refine_transcript_text_with_llm(
+        self,
+        segments: list[TranscribedSegment],
+    ) -> list[TranscribedSegment]:
+        if not self.transcript_llm_refinement_enabled:
+            return segments
+        try:
+            return self.transcript_refiner.refine(segments)
+        except Exception as exc:
+            logger.warning("Transcript LLM refinement failed: %s", exc)
             return segments
 
     def _build_transcribed_segments(
