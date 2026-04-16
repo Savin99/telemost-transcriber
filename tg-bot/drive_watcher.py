@@ -118,8 +118,8 @@ def archive_file(source_path: Path, file_id: str, filename: str) -> Path:
     return archive_path
 
 
-def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> list[dict]:
-    """Отправить аудио на WhisperX и получить сегменты."""
+def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> dict:
+    """Отправить аудио на WhisperX. Возвращает полный JSON-ответ."""
     payload = {"audio_path": str(audio_path)}
     if num_speakers is not None:
         payload["num_speakers"] = num_speakers
@@ -129,7 +129,7 @@ def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> list[
             json=payload,
         )
         response.raise_for_status()
-        return response.json().get("segments", [])
+        return response.json()
 
 
 def mark_as_processed(service, file_id: str):
@@ -173,14 +173,16 @@ def process_file(service, file_info: dict):
 
         # 2. Транскрибировать
         logger.info("Transcribing %s (speakers=%s)...", filename, num_speakers)
-        segments = transcribe_audio(archived_path, num_speakers=num_speakers)
+        transcribe_result = transcribe_audio(archived_path, num_speakers=num_speakers)
+        segments = transcribe_result.get("segments", [])
+        ai_status = transcribe_result.get("ai_status")
 
         if not segments:
             logger.warning("No segments found for %s — empty audio?", filename)
             mark_as_processed(service, file_id)
             return
 
-        logger.info("Got %d segments for %s", len(segments), filename)
+        logger.info("Got %d segments for %s (ai_status=%s)", len(segments), filename, ai_status)
 
         # 3. Сформировать MD
         transcript = {
@@ -188,6 +190,8 @@ def process_file(service, file_info: dict):
             "meeting_url": "",
             "duration_seconds": segments[-1].get("end", 0) if segments else 0,
         }
+        if ai_status:
+            transcript["ai_status"] = ai_status
 
         # 4. Загрузить MD
         drive_file = upload_transcript_md(

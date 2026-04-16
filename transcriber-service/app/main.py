@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .transcribe import TranscriberPipeline
+from .transcribe import TranscriberPipeline, TranscribeResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,8 +42,14 @@ class SegmentResponse(BaseModel):
     text: str
 
 
+class AiStatusResponse(BaseModel):
+    speaker_refinement: str = "disabled"
+    transcript_refinement: str = "disabled"
+
+
 class TranscribeResponse(BaseModel):
     segments: list[SegmentResponse]
+    ai_status: AiStatusResponse | None = None
 
 
 class SpeakerReviewRequest(BaseModel):
@@ -107,7 +113,7 @@ async def transcribe(request: TranscribeRequest):
         )
 
     try:
-        segments = pipeline.transcribe(
+        result: TranscribeResult = pipeline.transcribe(
             request.audio_path,
             num_speakers=request.num_speakers,
             min_speakers=request.min_speakers,
@@ -121,8 +127,12 @@ async def transcribe(request: TranscribeRequest):
                     end=seg.end,
                     text=seg.text,
                 )
-                for seg in segments
-            ]
+                for seg in result.segments
+            ],
+            ai_status=AiStatusResponse(
+                speaker_refinement=result.ai_status.speaker_refinement,
+                transcript_refinement=result.ai_status.transcript_refinement,
+            ),
         )
     except Exception as e:
         logger.exception("Transcription failed")

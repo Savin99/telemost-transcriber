@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -69,6 +69,18 @@ class TranscribedSegment:
     start: float
     end: float
     text: str
+
+
+@dataclass
+class AiStatus:
+    speaker_refinement: str = "disabled"
+    transcript_refinement: str = "disabled"
+
+
+@dataclass
+class TranscribeResult:
+    segments: list[TranscribedSegment]
+    ai_status: AiStatus = field(default_factory=AiStatus)
 
 
 class TranscriberPipeline:
@@ -392,44 +404,50 @@ class TranscriberPipeline:
                 )
 
             # 3. Формирование результата
+            ai_status = AiStatus()
             segments = self._build_transcribed_segments(result["segments"], mapping)
             segments = self._repair_short_replies(segments)
-            segments = self._refine_speakers_with_llm(segments)
-            segments = self._refine_transcript_text_with_llm(segments)
+            segments, ai_status.speaker_refinement = self._refine_speakers_with_llm(segments)
+            segments, ai_status.transcript_refinement = self._refine_transcript_text_with_llm(segments)
             seen_names = {
                 segment.speaker for segment in segments if segment.speaker is not None
             }
 
             logger.info(
-                "Transcription complete: %d segments, %d speakers",
+                "Transcription complete: %d segments, %d speakers, ai_status=%s",
                 len(segments),
                 len(seen_names),
+                ai_status,
             )
-            return segments
+            return TranscribeResult(segments=segments, ai_status=ai_status)
 
     def _refine_speakers_with_llm(
         self,
         segments: list[TranscribedSegment],
-    ) -> list[TranscribedSegment]:
+    ) -> tuple[list[TranscribedSegment], str]:
         if not self.speaker_llm_refinement_enabled:
-            return segments
+            return segments, "disabled"
         try:
-            return self.speaker_refiner.refine(segments)
+            refined = self.speaker_refiner.refine(segments)
+            changed = sum(1 for a, b in zip(segments, refined) if a.speaker != b.speaker)
+            return refined, f"applied ({changed} changes)"
         except Exception as exc:
             logger.warning("Speaker LLM refinement failed: %s", exc)
-            return segments
+            return segments, f"failed: {exc}"
 
     def _refine_transcript_text_with_llm(
         self,
         segments: list[TranscribedSegment],
-    ) -> list[TranscribedSegment]:
+    ) -> tuple[list[TranscribedSegment], str]:
         if not self.transcript_llm_refinement_enabled:
-            return segments
+            return segments, "disabled"
         try:
-            return self.transcript_refiner.refine(segments)
+            refined = self.transcript_refiner.refine(segments)
+            changed = sum(1 for a, b in zip(segments, refined) if a.text != b.text)
+            return refined, f"applied ({changed} changes)"
         except Exception as exc:
             logger.warning("Transcript LLM refinement failed: %s", exc)
-            return segments
+            return segments, f"failed: {exc}"
 
     def _build_transcribed_segments(
         self,

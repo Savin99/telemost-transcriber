@@ -161,16 +161,20 @@ def _build_transcript_payload(
     meeting_url: str,
     duration_seconds: float | None,
     segments: list[dict],
+    ai_status: dict | None = None,
 ) -> dict:
     effective_duration = duration_seconds
     if effective_duration is None and segments:
         effective_duration = float(segments[-1]["end"])
-    return {
+    payload = {
         "meeting_id": meeting_id,
         "meeting_url": meeting_url,
         "duration_seconds": effective_duration,
         "segments": segments,
     }
+    if ai_status:
+        payload["ai_status"] = ai_status
+    return payload
 
 
 def _load_tg_bot_module(module_name: str):
@@ -284,14 +288,15 @@ async def _bot_workflow(
 
             # 6. Отправка на транскрипцию
             await update_meeting_status(session, meeting_id, "transcribing", error_message=None)
-            segments = _normalize_transcript_segments(
-                await _transcribe(recording_path, num_speakers=num_speakers)
-            )
+            transcribe_result = await _transcribe(recording_path, num_speakers=num_speakers)
+            segments = _normalize_transcript_segments(transcribe_result["segments"])
+            ai_status = transcribe_result.get("ai_status")
             transcript_payload = _build_transcript_payload(
                 meeting_id=meeting_id,
                 meeting_url=meeting_url,
                 duration_seconds=duration,
                 segments=segments,
+                ai_status=ai_status,
             )
             drive_file = await _upload_transcript_to_drive(
                 transcript_payload,
@@ -385,8 +390,8 @@ async def _bot_workflow(
 async def _transcribe(
     recording_path: str,
     num_speakers: int | None = None,
-) -> list[dict]:
-    """Отправить запись на транскрипцию."""
+) -> dict:
+    """Отправить запись на транскрипцию. Возвращает полный JSON-ответ."""
     payload = {"audio_path": recording_path}
     if num_speakers is not None:
         payload["num_speakers"] = num_speakers
@@ -396,7 +401,7 @@ async def _transcribe(
             json=payload,
         )
         response.raise_for_status()
-        return response.json()["segments"]
+        return response.json()
 
 
 async def _get_meeting_or_404(session: AsyncSession, meeting_id: str) -> Meeting:

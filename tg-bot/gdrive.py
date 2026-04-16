@@ -112,6 +112,16 @@ def format_transcript_md(transcript: dict) -> str:
         dur_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
         lines.append(f"**Длительность:** {dur_str}")
     lines.append(f"**Сегментов:** {len(segments)}")
+
+    ai_status = transcript.get("ai_status")
+    if ai_status:
+        sr = ai_status.get("speaker_refinement", "disabled")
+        tr = ai_status.get("transcript_refinement", "disabled")
+        parts = []
+        parts.append(f"спикеры: {sr}")
+        parts.append(f"текст: {tr}")
+        lines.append(f"**AI:** {', '.join(parts)}")
+
     lines.append("")
     lines.append("---")
     lines.append("")

@@ -24,7 +24,9 @@ from app.voice_bank import VoiceBank
 
 def _write_test_wav(path: Path, duration_seconds: float = 3.0):
     sample_count = int(DEFAULT_SAMPLE_RATE * duration_seconds)
-    samples = np.sin(np.linspace(0.0, 4.0 * np.pi, sample_count)).astype(np.float32) * 0.1
+    samples = (
+        np.sin(np.linspace(0.0, 4.0 * np.pi, sample_count)).astype(np.float32) * 0.1
+    )
     pcm = np.clip(samples * 32767.0, -32768, 32767).astype(np.int16)
     with wave.open(str(path), "wb") as wav_file:
         wav_file.setnchannels(1)
@@ -56,12 +58,17 @@ class FakeDiarizePipeline:
         max_speakers=None,
         return_embeddings=True,
     ):
-        return ([dict(segment) for segment in self.diarization_segments], self.speaker_embeddings)
+        return (
+            [dict(segment) for segment in self.diarization_segments],
+            self.speaker_embeddings,
+        )
 
 
 class FakeIdentifier:
     def __init__(self, embeddings):
-        self.embeddings = [l2_normalize(np.asarray(item, dtype=np.float32)) for item in embeddings]
+        self.embeddings = [
+            l2_normalize(np.asarray(item, dtype=np.float32)) for item in embeddings
+        ]
         self.calls = 0
         self._matcher = SpeakerIdentifier(device="cpu")
 
@@ -136,7 +143,9 @@ class TranscriberPipelineTests(unittest.TestCase):
     ):
         pipeline = TranscriberPipeline(device="cpu")
         pipeline._asr_model = FakeAsrModel(asr_segments)
-        pipeline._diarize_model = FakeDiarizePipeline(diarization_segments, speaker_embeddings)
+        pipeline._diarize_model = FakeDiarizePipeline(
+            diarization_segments, speaker_embeddings
+        )
         pipeline._speaker_identifier = FakeIdentifier(identifier_embeddings)
         pipeline._voice_bank = FakeVoiceBank(centroids)
         return pipeline
@@ -168,10 +177,17 @@ class TranscriberPipelineTests(unittest.TestCase):
             )
 
             with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
-                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
-                    segments = pipeline.transcribe(str(audio_path))
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                ):
+                    result = pipeline.transcribe(str(audio_path))
 
-            self.assertEqual([segment.speaker for segment in segments], ["Alice", "Unknown Speaker 1"])
+            segments = result.segments
+            self.assertEqual(
+                [segment.speaker for segment in segments],
+                ["Alice", "Unknown Speaker 1"],
+            )
             self.assertEqual(pipeline.speaker_identifier.calls, 2)
             self.assertEqual(len(pipeline.voice_bank.saved_bundles), 1)
 
@@ -196,11 +212,14 @@ class TranscriberPipelineTests(unittest.TestCase):
             )
 
             with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
-                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
-                    segments = pipeline.transcribe(str(audio_path))
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                ):
+                    result = pipeline.transcribe(str(audio_path))
 
             self.assertEqual(
-                [segment.speaker for segment in segments],
+                [segment.speaker for segment in result.segments],
                 ["Unknown Speaker 1", "Unknown Speaker 2"],
             )
 
@@ -222,11 +241,14 @@ class TranscriberPipelineTests(unittest.TestCase):
             )
 
             with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
-                with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}):
-                    segments = pipeline.transcribe(str(audio_path))
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                ):
+                    result = pipeline.transcribe(str(audio_path))
 
             self.assertEqual(
-                [segment.speaker for segment in segments],
+                [segment.speaker for segment in result.segments],
                 ["Unknown Speaker 1", "Unknown Speaker 2"],
             )
             self.assertEqual(pipeline.speaker_identifier.calls, 0)
@@ -253,7 +275,13 @@ class TranscriberPipelineTests(unittest.TestCase):
                 )
 
                 with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
-                    with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}, clear=False):
+                    with patch.dict(
+                        "os.environ",
+                        {
+                            "DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"
+                        },
+                        clear=False,
+                    ):
                         pipeline.transcribe(str(audio_path))
 
             self.assertEqual(pipeline.asr_model.transcribe_calls[0]["language"], "ru")
@@ -281,7 +309,13 @@ class TranscriberPipelineTests(unittest.TestCase):
                 }
 
                 with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
-                    with patch.dict("os.environ", {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"}, clear=False):
+                    with patch.dict(
+                        "os.environ",
+                        {
+                            "DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"
+                        },
+                        clear=False,
+                    ):
                         pipeline.transcribe(str(audio_path))
 
             self.assertIsNone(pipeline.asr_language)
@@ -447,7 +481,9 @@ class TranscriberPipelineTests(unittest.TestCase):
 
         self.assertEqual(segments[2].speaker, "Ольга")
 
-    def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(self):
+    def test_review_label_normalizes_name_and_auto_merges_similar_unknown_clusters(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as temp_dir:
             audio_path = Path(temp_dir) / "meeting.wav"
             _write_test_wav(audio_path, duration_seconds=3.0)
