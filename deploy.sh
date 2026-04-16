@@ -31,6 +31,11 @@ if [ -z "${VAST_SSH:-}" ]; then
     exit 1
 fi
 
+# --- Извлечение параметров SSH для scp ---
+SSH_PORT=$(printf '%s\n' "$VAST_SSH" | awk '{for (i = 1; i <= NF; i++) if ($i == "-p") {print $(i + 1); exit}}')
+SSH_PORT=${SSH_PORT:-22}
+REMOTE_HOST=$(printf '%s\n' "$VAST_SSH" | awk '{print $NF}')
+
 REMOTE_APP="/workspace/telemost-transcriber"
 REMOTE_LOGS="/workspace/logs"
 TARGET="${1:-all}"
@@ -70,49 +75,10 @@ log "Git pull на сервере..."
 $VAST_SSH "cd $REMOTE_APP && git pull --ff-only" 2>&1 | tail -5
 log "Pull готов"
 
-# --- 3. Рестарт сервисов ---
-restart_tg() {
-    log "Рестарт tg-bot..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TG_BOT_TOKEN:-}\" ]; then echo 'tg-bot skipped: TG_BOT_TOKEN is not set'; else mkdir -p $REMOTE_LOGS; pkill -f '^/venv/main/bin/python bot.py$' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/tg-bot && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && TG_BOT_TOKEN=\$TG_BOT_TOKEN BOT_API_URL=http://localhost:8000 nohup /venv/main/bin/python bot.py > $REMOTE_LOGS/tg-bot.log 2>&1 < /dev/null & echo 'tg-bot PID: '\$!; fi" 2>/dev/null
-}
-
-restart_watcher() {
-    log "Рестарт drive-watcher..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${GDRIVE_FOLDER_ID:-}\" ]; then echo 'drive-watcher skipped: GDRIVE_FOLDER_ID is not set'; else mkdir -p $REMOTE_LOGS; pkill -f 'python drive_watcher.py' 2>/dev/null || true; sleep 1; cd $REMOTE_APP/tg-bot && TRANSCRIBER_URL=http://localhost:8001 GDRIVE_FOLDER_ID=\"\${GDRIVE_FOLDER_ID}\" GDRIVE_CLIENT_SECRET=\"\${GDRIVE_CLIENT_SECRET:-}\" GDRIVE_TOKEN_PATH=\"\${GDRIVE_TOKEN_PATH:-}\" DRIVE_POLL_INTERVAL=\"\${DRIVE_POLL_INTERVAL:-30}\" nohup /venv/main/bin/python drive_watcher.py > $REMOTE_LOGS/drive-watcher.log 2>&1 < /dev/null & echo 'drive-watcher PID: '\$!; fi" 2>/dev/null
-}
-
-restart_bot() {
-    log "Рестарт bot-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -z \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then echo 'bot-service skipped: TELEMOST_SERVICE_API_KEY is not set'; exit 1; fi; mkdir -p /workspace/recordings $REMOTE_LOGS; fuser -k 8000/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/bot-service && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && TRANSCRIBER_URL=http://localhost:8001 DATABASE_URL=\"sqlite+aiosqlite:////workspace/transcriber.db\" RECORDINGS_DIR=/workspace/recordings BOT_NAME=\"\${BOT_NAME:-Транскрибатор}\" TELEMOST_SERVICE_API_KEY=\"\${TELEMOST_SERVICE_API_KEY}\" GDRIVE_FOLDER_ID=\"\${GDRIVE_FOLDER_ID:-}\" GDRIVE_CLIENT_SECRET=\"\${GDRIVE_CLIENT_SECRET:-}\" GDRIVE_TOKEN_PATH=\"\${GDRIVE_TOKEN_PATH:-}\" MEETING_METADATA_LLM_ENABLED=\"\${MEETING_METADATA_LLM_ENABLED:-false}\" ANTHROPIC_API_KEY=\"\${ANTHROPIC_API_KEY:-}\" MEETING_METADATA_RULES_JSON=\"\${MEETING_METADATA_RULES_JSON:-}\" MEETING_METADATA_RULES_PATH=\"\${MEETING_METADATA_RULES_PATH:-}\" MEETING_METADATA_EXECUTOR_MODEL=\"\${MEETING_METADATA_EXECUTOR_MODEL:-claude-sonnet-4-6}\" MEETING_METADATA_ADVISOR_MODEL=\"\${MEETING_METADATA_ADVISOR_MODEL:-claude-opus-4-6}\" MEETING_METADATA_ADVISOR_ENABLED=\"\${MEETING_METADATA_ADVISOR_ENABLED:-true}\" MEETING_METADATA_ADVISOR_MAX_USES=\"\${MEETING_METADATA_ADVISOR_MAX_USES:-2}\" MEETING_METADATA_TIMEOUT_SEC=\"\${MEETING_METADATA_TIMEOUT_SEC:-120}\" MEETING_METADATA_MAX_TOKENS=\"\${MEETING_METADATA_MAX_TOKENS:-1024}\" DISPLAY=:99 nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > $REMOTE_LOGS/bot.log 2>&1 < /dev/null & echo 'bot-service PID: '\$!" 2>/dev/null
-}
-
-restart_transcriber() {
-    log "Рестарт transcriber-service..."
-    $VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; mkdir -p /workspace/voice_bank $REMOTE_LOGS; fuser -k 8001/tcp 2>/dev/null || true; sleep 1; cd $REMOTE_APP/transcriber-service && /venv/main/bin/pip install --quiet --disable-pip-version-check torch torchaudio --index-url https://download.pytorch.org/whl/cu124 && /venv/main/bin/pip install --quiet --disable-pip-version-check \"whisperx @ git+https://github.com/m-bain/whisperX.git\" && /venv/main/bin/pip install --quiet --disable-pip-version-check -r requirements.txt && HF_TOKEN=\${HF_TOKEN:-} ANTHROPIC_API_KEY=\${ANTHROPIC_API_KEY:-} DIARIZATION_MODEL=\${DIARIZATION_MODEL:-pyannote/speaker-diarization-community-1} ASR_LANGUAGE=\${ASR_LANGUAGE:-ru} CLUSTERING_THRESHOLD=\${CLUSTERING_THRESHOLD:-0.35} CLUSTERING_FA=\${CLUSTERING_FA:-0.04} CLUSTERING_FB=\${CLUSTERING_FB:-0.9} VOICE_BANK_DIR=\${VOICE_BANK_DIR:-/workspace/voice_bank} VOICE_MATCH_THRESHOLD=\${VOICE_MATCH_THRESHOLD:-0.40} MIN_EMBEDDING_SEGMENT_SEC=\${MIN_EMBEDDING_SEGMENT_SEC:-1.0} SPEAKER_LLM_REFINEMENT_ENABLED=\${SPEAKER_LLM_REFINEMENT_ENABLED:-false} SPEAKER_LLM_EXECUTOR_MODEL=\${SPEAKER_LLM_EXECUTOR_MODEL:-claude-sonnet-4-6} SPEAKER_LLM_ADVISOR_MODEL=\${SPEAKER_LLM_ADVISOR_MODEL:-claude-opus-4-6} SPEAKER_LLM_ADVISOR_ENABLED=\${SPEAKER_LLM_ADVISOR_ENABLED:-true} TRANSCRIPT_LLM_REFINEMENT_ENABLED=\${TRANSCRIPT_LLM_REFINEMENT_ENABLED:-true} TRANSCRIPT_LLM_EXECUTOR_MODEL=\${TRANSCRIPT_LLM_EXECUTOR_MODEL:-claude-sonnet-4-6} TRANSCRIPT_LLM_ADVISOR_MODEL=\${TRANSCRIPT_LLM_ADVISOR_MODEL:-claude-opus-4-6} TRANSCRIPT_LLM_ADVISOR_ENABLED=\${TRANSCRIPT_LLM_ADVISOR_ENABLED:-true} nohup /venv/main/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 > $REMOTE_LOGS/transcriber.log 2>&1 < /dev/null & echo 'transcriber-service PID: '\$!" 2>/dev/null
-}
-
-case "$TARGET" in
-    tg)           restart_tg ;;
-    watcher)      restart_watcher ;;
-    bot)          restart_bot ;;
-    transcriber)  restart_transcriber ;;
-    all)
-        restart_tg
-        restart_watcher
-        restart_bot
-        # transcriber обычно не трогаем — долго грузит модель
-        warn "transcriber НЕ перезапущен (модель грузится ~2 мин). Для рестарта: ./deploy.sh transcriber"
-        ;;
-    *)
-        err "Неизвестный сервис: $TARGET"
-        echo "Доступные: tg, watcher, bot, transcriber, all, logs"
-        exit 1
-        ;;
-esac
-
-# --- 4. Проверка ---
-sleep 2
-log "Проверка health..."
-$VAST_SSH "source /workspace/.bashrc 2>/dev/null || true; if [ -n \"\${TELEMOST_SERVICE_API_KEY:-}\" ]; then curl -s -H \"X-API-Key: \${TELEMOST_SERVICE_API_KEY}\" http://localhost:8000/health 2>/dev/null && echo '' || echo 'bot-service: не отвечает'; else echo 'bot-service: TELEMOST_SERVICE_API_KEY is not set'; fi; curl -s http://localhost:8001/health 2>/dev/null && echo '' || echo 'transcriber: не отвечает'" 2>/dev/null
+# --- 3. Копируем и запускаем скрипт рестарта ---
+log "Рестарт сервисов ($TARGET)..."
+scp -P "$SSH_PORT" "$SCRIPT_DIR/remote/restart_service.sh" \
+    "$REMOTE_HOST:$REMOTE_APP/remote/restart_service.sh" 2>/dev/null
+$VAST_SSH "bash $REMOTE_APP/remote/restart_service.sh $TARGET"
 
 log "Готово! 🚀"

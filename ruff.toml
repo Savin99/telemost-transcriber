@@ -1,0 +1,8 @@
+[lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long — не критично
+]
+
+[lint.per-file-ignores]
+"*/tests/*" = ["F811", "E402", "F401"]  # fixtures, sys.path manipulation, test utils

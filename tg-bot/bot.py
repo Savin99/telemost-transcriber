@@ -31,7 +31,9 @@ BOT_API = os.getenv("BOT_API_URL", "http://localhost:8000")
 BOT_API_KEY = os.getenv("BOT_API_KEY") or os.getenv("TELEMOST_SERVICE_API_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 VOICE_REVIEW_SAMPLE_COUNT = int(os.getenv("VOICE_REVIEW_SAMPLE_COUNT", "2"))
-VOICE_REVIEW_SAMPLE_MAX_SECONDS = float(os.getenv("VOICE_REVIEW_SAMPLE_MAX_SECONDS", "10"))
+VOICE_REVIEW_SAMPLE_MAX_SECONDS = float(
+    os.getenv("VOICE_REVIEW_SAMPLE_MAX_SECONDS", "10")
+)
 
 bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -78,10 +80,12 @@ async def cmd_rec(msg: Message, command: CommandObject):
     text = command.args or ""
     match = TELEMOST_RE.search(text)
     if not match:
-        await msg.answer("Укажи ссылку: <code>/rec https://telemost.yandex.ru/j/...</code>\nМожно указать кол-во спикеров: <code>/rec ссылка 3</code>")
+        await msg.answer(
+            "Укажи ссылку: <code>/rec https://telemost.yandex.ru/j/...</code>\nМожно указать кол-во спикеров: <code>/rec ссылка 3</code>"
+        )
         return
     # Парсим число спикеров после URL
-    remainder = text[match.end():].strip()
+    remainder = text[match.end() :].strip()
     num_speakers = int(remainder) if remainder.isdigit() else None
     await _join_meeting(msg, match.group(0), num_speakers=num_speakers)
 
@@ -252,7 +256,7 @@ async def handle_pending_voice_label(msg: Message):
 
     await msg.answer(
         f"Запомнил: <b>{_safe_html(data['name'])}</b>. "
-        f"В этой встрече тоже переименовал { _safe_html(data['previous_name']) }."
+        f"В этой встрече тоже переименовал {_safe_html(data['previous_name'])}."
     )
     merged_labels = data.get("merged_labels", [])
     if merged_labels:
@@ -281,12 +285,10 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
     chat_id = msg.chat.id
 
     if chat_id in active:
-        await msg.answer(
-            "Уже идёт запись. Сначала /stop"
-        )
+        await msg.answer("Уже идёт запись. Сначала /stop")
         return
 
-    status_msg = await msg.answer(f"Подключаюсь к встрече...")
+    status_msg = await msg.answer("Подключаюсь к встрече...")
 
     payload = {"meeting_url": url}
     if num_speakers is not None:
@@ -309,9 +311,9 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
     active[chat_id] = {"meeting_id": meeting_id, "url": url}
 
     await status_msg.edit_text(
-        f"Бот подключается к встрече.\n\n"
-        f"Когда закончите — отправьте /stop\n"
-        f"Или бот завершит автоматически, когда встреча закончится."
+        "Бот подключается к встрече.\n\n"
+        "Когда закончите — отправьте /stop\n"
+        "Или бот завершит автоматически, когда встреча закончится."
     )
 
     # Фоновое ожидание завершения
@@ -412,7 +414,9 @@ def _format_segment_preview(segments: list[dict]) -> str:
         return "без подходящих сегментов"
     parts = []
     for segment in segments[:3]:
-        parts.append(f"{_format_time(float(segment['start']))}-{_format_time(float(segment['end']))}")
+        parts.append(
+            f"{_format_time(float(segment['start']))}-{_format_time(float(segment['end']))}"
+        )
     if len(segments) > 3:
         parts.append("...")
     return ", ".join(parts)
@@ -433,7 +437,9 @@ async def _start_speaker_review(chat_id: int, meeting_id: str, quiet: bool = Fal
             review = response.json()
         except Exception as e:
             if quiet:
-                logger.warning("Could not start speaker review for %s: %s", meeting_id, e)
+                logger.warning(
+                    "Could not start speaker review for %s: %s", meeting_id, e
+                )
             else:
                 await bot.send_message(
                     chat_id,
@@ -535,7 +541,7 @@ async def _send_next_review_item(chat_id: int):
         f"Текущая метка: <b>{_safe_html(current['current_name'])}</b>\n"
         f"Таймкоды: {_safe_html(_format_segment_preview(current.get('segments', [])))}\n\n"
         "Просто ответь именем одним сообщением.\n"
-        "Если это тот же человек, напиши то же самое имя без слов вроде \"тоже\".",
+        'Если это тот же человек, напиши то же самое имя без слов вроде "тоже".',
     )
 
 
@@ -581,7 +587,9 @@ async def _send_transcript(chat_id: int, transcript: dict):
         await bot.send_message(chat_id, message)
     else:
         # Отправить короткую сводку + файл
-        await bot.send_message(chat_id, header + f"Сегментов: {len(segments)}. Отправляю файлом...")
+        await bot.send_message(
+            chat_id, header + f"Сегментов: {len(segments)}. Отправляю файлом..."
+        )
         file = BufferedInputFile(
             full_text_plain.encode("utf-8"),
             filename="transcript.txt",
@@ -593,7 +601,7 @@ async def _send_transcript(chat_id: int, transcript: dict):
     if drive_file and drive_file.get("web_view_link"):
         safe_link = html.escape(drive_file["web_view_link"], quote=True)
         await bot.send_message(
-            chat_id, f"📁 <a href=\"{safe_link}\">Транскрипт на Google Drive</a>"
+            chat_id, f'📁 <a href="{safe_link}">Транскрипт на Google Drive</a>'
         )
 
     await _maybe_start_speaker_review(chat_id, transcript)

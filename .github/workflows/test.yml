@@ -1,0 +1,57 @@
+name: Tests & Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test-bot-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r bot-service/requirements.txt pytest
+      - name: Run tests
+        run: pytest bot-service/tests/ -v
+
+  test-tg-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r tg-bot/requirements.txt pytest
+      - name: Run tests
+        run: pytest tg-bot/tests/ -v
+
+  test-transcriber-service:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install "whisperx @ git+https://github.com/m-bain/whisperX.git"
+          pip install -r transcriber-service/requirements.txt pytest
+      - name: Run tests
+        run: pytest transcriber-service/tests/ -v

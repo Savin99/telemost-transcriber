@@ -1,5 +1,5 @@
-aiogram>=3.10
-httpx>=0.28
-google-api-python-client>=2.100
-google-auth>=2.23
-google-auth-oauthlib>=1.1
+aiogram==3.27.*
+httpx==0.28.*
+google-api-python-client==2.194.*
+google-auth==2.49.*
+google-auth-oauthlib==1.3.*

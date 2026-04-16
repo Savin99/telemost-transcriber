@@ -2,10 +2,10 @@ fastapi==0.115.*
 uvicorn[standard]==0.34.*
 playwright==1.52.*
 sqlalchemy[asyncio]==2.0.*
-aiosqlite>=0.20
-asyncpg>=0.30
+aiosqlite==0.22.*
+asyncpg==0.31.*
 httpx==0.28.*
 pydantic==2.11.*
-google-api-python-client>=2.100
-google-auth>=2.23
-google-auth-oauthlib>=1.1
+google-api-python-client==2.194.*
+google-auth==2.49.*
+google-auth-oauthlib==1.3.*
