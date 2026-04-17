@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .speaker_refiner import env_bool
-from .transcribe import TranscriberPipeline, TranscribeResult
+from .transcribe import SpeakerHint, TranscriberPipeline, TranscribeResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,11 +55,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Transcriber Service", lifespan=lifespan)
 
 
+class SpeakerHintRequest(BaseModel):
+    display_name: str
+    enrolled: bool = False
+    voice_bank_id: str | None = None
+    role: str | None = None
+    person_id: int | None = None
+
+
 class TranscribeRequest(BaseModel):
     audio_path: str
     num_speakers: int | None = None
     min_speakers: int | None = None
     max_speakers: int | None = None
+    speakers_hint: list[SpeakerHintRequest] | None = None
+    auto_enroll_unknown: bool = False
+    initial_prompt: str | None = None
 
 
 class SegmentResponse(BaseModel):
@@ -74,9 +85,18 @@ class AiStatusResponse(BaseModel):
     transcript_refinement: str = "disabled"
 
 
+class EnrolledVoiceprintResponse(BaseModel):
+    voice_bank_id: str
+    display_name: str
+    person_id: int | None = None
+    role: str | None = None
+
+
 class TranscribeResponse(BaseModel):
     segments: list[SegmentResponse]
     ai_status: AiStatusResponse | None = None
+    enrolled_voiceprints: list[EnrolledVoiceprintResponse] = []
+    speaker_roles: dict[str, str] = {}
 
 
 class SpeakerReviewRequest(BaseModel):
@@ -139,12 +159,28 @@ async def transcribe(request: TranscribeRequest):
             detail=f"Audio file not found: {request.audio_path}",
         )
 
+    speakers_hint = None
+    if request.speakers_hint:
+        speakers_hint = [
+            SpeakerHint(
+                display_name=hint.display_name,
+                enrolled=hint.enrolled,
+                voice_bank_id=hint.voice_bank_id,
+                role=hint.role,
+                person_id=hint.person_id,
+            )
+            for hint in request.speakers_hint
+        ]
+
     try:
         result: TranscribeResult = pipeline.transcribe(
             request.audio_path,
             num_speakers=request.num_speakers,
             min_speakers=request.min_speakers,
             max_speakers=request.max_speakers,
+            speakers_hint=speakers_hint,
+            auto_enroll_unknown=request.auto_enroll_unknown,
+            initial_prompt=request.initial_prompt,
         )
         return TranscribeResponse(
             segments=[
@@ -160,6 +196,16 @@ async def transcribe(request: TranscribeRequest):
                 speaker_refinement=result.ai_status.speaker_refinement,
                 transcript_refinement=result.ai_status.transcript_refinement,
             ),
+            enrolled_voiceprints=[
+                EnrolledVoiceprintResponse(
+                    voice_bank_id=voiceprint.voice_bank_id,
+                    display_name=voiceprint.display_name,
+                    person_id=voiceprint.person_id,
+                    role=voiceprint.role,
+                )
+                for voiceprint in result.enrolled_voiceprints
+            ],
+            speaker_roles=dict(result.speaker_roles),
         )
     except Exception as e:
         logger.exception("Transcription failed")

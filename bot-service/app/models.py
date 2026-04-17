@@ -4,11 +4,14 @@ from pydantic import BaseModel
 
 MeetingLifecycleStatus = Literal[
     "pending",
+    "connecting",
     "recording",
     "leaving",
     "transcribing",
+    "refining",
     "done",
     "error",
+    "cancelled",
 ]
 
 
