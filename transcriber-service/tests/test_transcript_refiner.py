@@ -20,7 +20,9 @@ class FakeTranscriptRefiner:
     def refine(self, segments):
         self.calls += 1
         return [
-            segment if index != 0 else TranscribedSegment(
+            segment
+            if index != 0
+            else TranscribedSegment(
                 speaker=segment.speaker,
                 start=segment.start,
                 end=segment.end,
@@ -55,7 +57,9 @@ class TranscriptRefinerTests(unittest.TestCase):
         self.assertEqual(segments[0].text, "сырой текст")
 
     def test_request_payload_uses_advisor_tool(self):
-        refiner = AnthropicAdvisorTranscriptRefiner(api_key="test", advisor_enabled=True)
+        refiner = AnthropicAdvisorTranscriptRefiner(
+            api_key="test", advisor_enabled=True
+        )
         payload = refiner._build_request_payload(
             [
                 TranscribedSegment("Вячеслав Т.", 0.0, 1.0, "привет"),
@@ -72,7 +76,9 @@ class TranscriptRefinerTests(unittest.TestCase):
         pipeline.transcript_llm_refinement_enabled = False
         segments = [TranscribedSegment("Вячеслав Т.", 0.0, 1.0, "Привет")]
 
-        self.assertIs(pipeline._refine_transcript_text_with_llm(segments), segments)
+        refined, status = pipeline._refine_transcript_text_with_llm(segments)
+        self.assertIs(refined, segments)
+        self.assertEqual(status, "disabled")
 
     def test_pipeline_calls_transcript_refiner_when_enabled(self):
         pipeline = TranscriberPipeline(device="cpu")
@@ -83,10 +89,11 @@ class TranscriptRefinerTests(unittest.TestCase):
             TranscribedSegment("Ольга", 1.1, 1.4, "да"),
         ]
 
-        refined = pipeline._refine_transcript_text_with_llm(segments)
+        refined, status = pipeline._refine_transcript_text_with_llm(segments)
 
         self.assertEqual(pipeline._transcript_refiner.calls, 1)
         self.assertEqual(refined[0].text, "Исправленный текст")
+        self.assertTrue(status.startswith("applied"))
 
 
 if __name__ == "__main__":
