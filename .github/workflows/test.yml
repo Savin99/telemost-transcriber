@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -51,7 +52,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install "whisperx @ git+https://github.com/m-bain/whisperX.git"
+          pip install "whisperx @ git+https://github.com/m-bain/whisperX.git@v3.8.5"
           pip install -r transcriber-service/requirements.txt pytest
       - name: Run tests
         run: pytest transcriber-service/tests/ -v
