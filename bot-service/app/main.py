@@ -42,6 +42,34 @@ from .telemost import TelemostSession
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_required_env() -> None:
+    """Падаем в lifespan, если включённые фичи требуют недостающих env."""
+    missing: list[str] = []
+
+    if (
+        _env_bool("MEETING_METADATA_LLM_ENABLED", False)
+        and not os.getenv("ANTHROPIC_API_KEY", "").strip()
+    ):
+        missing.append(
+            "ANTHROPIC_API_KEY is required when MEETING_METADATA_LLM_ENABLED is true"
+        )
+
+    if missing:
+        for error in missing:
+            logger.error("Startup env check failed: %s", error)
+        raise RuntimeError(
+            "Missing required environment variables: " + "; ".join(missing)
+        )
+
+
 TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://transcriber:8001")
 RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
 API_KEY_HEADER = "X-API-Key"
@@ -70,7 +98,9 @@ def _load_service_api_key() -> str:
 async def require_api_key(
     x_api_key: str | None = Header(default=None, alias=API_KEY_HEADER),
 ):
-    expected_api_key = getattr(app.state, "service_api_key", None) or _load_service_api_key()
+    expected_api_key = (
+        getattr(app.state, "service_api_key", None) or _load_service_api_key()
+    )
     if not x_api_key or not secrets.compare_digest(x_api_key, expected_api_key):
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -196,7 +226,9 @@ def _upload_transcript_to_drive_sync(
         source_filename=source_filename,
     )
     required_keys = ("file_id", "folder_id", "filename", "web_view_link")
-    if not isinstance(result, dict) or any(not result.get(key) for key in required_keys):
+    if not isinstance(result, dict) or any(
+        not result.get(key) for key in required_keys
+    ):
         raise RuntimeError("Google Drive upload failed or returned incomplete metadata")
     return {key: str(result[key]) for key in required_keys}
 
@@ -216,6 +248,7 @@ async def _upload_transcript_to_drive(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.service_api_key = _load_service_api_key()
+    validate_required_env()
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     await init_db()
     yield
@@ -258,7 +291,9 @@ async def _bot_workflow(
                 raise asyncio.CancelledError
 
             # 2. Запуск записи (PulseAudio per-session sink + FFmpeg)
-            await update_meeting_status(session, meeting_id, "recording", error_message=None)
+            await update_meeting_status(
+                session, meeting_id, "recording", error_message=None
+            )
             await capture.start()
             info = active_sessions.get(meeting_id)
             if info:
@@ -287,8 +322,12 @@ async def _bot_workflow(
             await telemost.leave()
 
             # 6. Отправка на транскрипцию
-            await update_meeting_status(session, meeting_id, "transcribing", error_message=None)
-            transcribe_result = await _transcribe(recording_path, num_speakers=num_speakers)
+            await update_meeting_status(
+                session, meeting_id, "transcribing", error_message=None
+            )
+            transcribe_result = await _transcribe(
+                recording_path, num_speakers=num_speakers
+            )
             segments = _normalize_transcript_segments(transcribe_result["segments"])
             ai_status = transcribe_result.get("ai_status")
             transcript_payload = _build_transcript_payload(
@@ -326,7 +365,9 @@ async def _bot_workflow(
             logger.info("Meeting %s processed successfully", meeting_id)
 
         except asyncio.CancelledError:
-            logger.info("Meeting %s was stopped before recording pipeline finished", meeting_id)
+            logger.info(
+                "Meeting %s was stopped before recording pipeline finished", meeting_id
+            )
             await session.rollback()
 
             info = active_sessions.get(meeting_id) or {}
@@ -465,7 +506,9 @@ async def join_meeting(
 
     # Запуск workflow в фоне
     task = asyncio.create_task(
-        _bot_workflow(meeting_id, request.meeting_url, request.bot_name, request.num_speakers)
+        _bot_workflow(
+            meeting_id, request.meeting_url, request.bot_name, request.num_speakers
+        )
     )
     active_sessions[meeting_id]["task"] = task
 
@@ -547,7 +590,9 @@ async def get_transcript(
     segments = result.scalars().all()
     drive_file = _build_drive_file(meeting)
     if not meeting.transcript_url or not drive_file:
-        raise HTTPException(status_code=500, detail="Transcript Drive upload metadata is missing")
+        raise HTTPException(
+            status_code=500, detail="Transcript Drive upload metadata is missing"
+        )
 
     return TranscriptResponse(
         meeting_id=meeting.id,
@@ -584,10 +629,7 @@ async def list_meetings(
     result = await session.execute(query)
     meetings = result.scalars().all()
 
-    return [
-        _build_meeting_status(meeting)
-        for meeting in meetings
-    ]
+    return [_build_meeting_status(meeting) for meeting in meetings]
 
 
 @app.post(
@@ -619,7 +661,9 @@ async def review_unknown_speakers(
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            raise HTTPException(
+                status_code=e.response.status_code, detail=e.response.text
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -644,7 +688,9 @@ async def review_unknown_speakers(
     )
 
 
-@app.get("/meetings/{meeting_id}/speaker-review/{meeting_key}/{speaker_label}/samples/{sample_index}")
+@app.get(
+    "/meetings/{meeting_id}/speaker-review/{meeting_key}/{speaker_label}/samples/{sample_index}"
+)
 async def download_speaker_review_sample(
     meeting_id: str,
     meeting_key: str,
@@ -660,7 +706,9 @@ async def download_speaker_review_sample(
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            raise HTTPException(
+                status_code=e.response.status_code, detail=e.response.text
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -696,7 +744,9 @@ async def label_speaker_review(
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+            raise HTTPException(
+                status_code=e.response.status_code, detail=e.response.text
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
@@ -705,7 +755,9 @@ async def label_speaker_review(
     rename_sources.extend(
         item["previous_name"] for item in data.get("merged_labels", [])
     )
-    for previous_name in {name for name in rename_sources if name and name != data["name"]}:
+    for previous_name in {
+        name for name in rename_sources if name and name != data["name"]
+    }:
         await session.execute(
             update(TranscriptSegmentDB)
             .where(TranscriptSegmentDB.meeting_id == meeting_id)

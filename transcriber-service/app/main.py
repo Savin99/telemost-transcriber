@@ -6,10 +6,36 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from .speaker_refiner import env_bool
 from .transcribe import TranscriberPipeline, TranscribeResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def validate_required_env() -> None:
+    """Падаем на старте, если включённые фичи требуют недостающих env."""
+    missing: list[str] = []
+
+    llm_enabled = env_bool("SPEAKER_LLM_REFINEMENT_ENABLED", False) or env_bool(
+        "TRANSCRIPT_LLM_REFINEMENT_ENABLED", False
+    )
+    if llm_enabled and not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        missing.append(
+            "ANTHROPIC_API_KEY is required when SPEAKER_LLM_REFINEMENT_ENABLED "
+            "or TRANSCRIPT_LLM_REFINEMENT_ENABLED is true"
+        )
+
+    if not os.getenv("HF_TOKEN", "").strip():
+        missing.append("HF_TOKEN is required for speaker diarization")
+
+    if missing:
+        for error in missing:
+            logger.error("Startup env check failed: %s", error)
+        raise RuntimeError(
+            "Missing required environment variables: " + "; ".join(missing)
+        )
+
 
 pipeline: TranscriberPipeline | None = None
 
@@ -17,6 +43,7 @@ pipeline: TranscriberPipeline | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pipeline
+    validate_required_env()
     logger.info("Starting transcriber service...")
     pipeline = TranscriberPipeline()
     pipeline.preload()
@@ -175,7 +202,9 @@ async def speaker_review(request: SpeakerReviewRequest):
             if speaker_label in sample_segments:
                 segments = sample_segments[speaker_label]
             else:
-                segments = profile.get("embedding_segments") or profile.get("segments") or []
+                segments = (
+                    profile.get("embedding_segments") or profile.get("segments") or []
+                )
             items.append(
                 SpeakerReviewItemResponse(
                     speaker_label=speaker_label,
@@ -189,7 +218,9 @@ async def speaker_review(request: SpeakerReviewRequest):
                         )
                         for segment in segments[:3]
                     ],
-                    sample_count=len(bundle.get("sample_paths", {}).get(speaker_label, [])),
+                    sample_count=len(
+                        bundle.get("sample_paths", {}).get(speaker_label, [])
+                    ),
                 )
             )
 
