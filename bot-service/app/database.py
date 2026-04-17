@@ -45,6 +45,20 @@ class Meeting(Base):
     drive_folder_id = Column(Text)
     drive_filename = Column(Text)
     drive_web_view_link = Column(Text)
+    # Public v1 API (see api_v1.py). Legacy flow leaves them NULL.
+    source = Column(String(20), default="legacy")
+    session_id = Column(Text, index=True)
+    session_type = Column(String(32))
+    language = Column(String(16))
+    speakers_payload = Column(Text)
+    enrolled_voiceprints = Column(Text)
+    options_json = Column(Text)
+    initial_prompt = Column(Text)
+    callback_url = Column(Text)
+    audio_retention_expires_at = Column(Text)
+    progress_stage = Column(String(32))
+    progress_percent = Column(Float)
+    error_code = Column(String(64))
     created_at = Column(Text, default=_now_iso)
     updated_at = Column(Text, default=_now_iso, onupdate=_now_iso)
 
@@ -145,8 +159,12 @@ async def _migrate_postgres_transcript_segment_id(conn):
         )
 
     await conn.execute(text("ALTER TABLE transcript_segments DROP COLUMN id"))
-    await conn.execute(text("ALTER TABLE transcript_segments RENAME COLUMN id_uuid_tmp TO id"))
-    await conn.execute(text("ALTER TABLE transcript_segments ALTER COLUMN id SET NOT NULL"))
+    await conn.execute(
+        text("ALTER TABLE transcript_segments RENAME COLUMN id_uuid_tmp TO id")
+    )
+    await conn.execute(
+        text("ALTER TABLE transcript_segments ALTER COLUMN id SET NOT NULL")
+    )
     await conn.execute(text("ALTER TABLE transcript_segments ADD PRIMARY KEY (id)"))
 
     logger.info("Migration complete: transcript_segments.id is now UUID")
@@ -163,15 +181,57 @@ async def _ensure_meeting_upload_columns(conn):
         "drive_folder_id": "TEXT",
         "drive_filename": "TEXT",
         "drive_web_view_link": "TEXT",
+        # Public v1 API columns.
+        "source": "VARCHAR(20)",
+        "session_id": "TEXT",
+        "session_type": "VARCHAR(32)",
+        "language": "VARCHAR(16)",
+        "speakers_payload": "TEXT",
+        "enrolled_voiceprints": "TEXT",
+        "options_json": "TEXT",
+        "initial_prompt": "TEXT",
+        "callback_url": "TEXT",
+        "audio_retention_expires_at": "TEXT",
+        "progress_stage": "VARCHAR(32)",
+        "progress_percent": "DOUBLE PRECISION",
+        "error_code": "VARCHAR(64)",
     }
 
     for column_name, sql_type in required_columns.items():
         if column_name in column_names:
             continue
+        if conn.dialect.name != "postgresql" and sql_type == "DOUBLE PRECISION":
+            sql_type = "REAL"
         await conn.execute(
             text(f"ALTER TABLE meetings ADD COLUMN {column_name} {sql_type}")
         )
         logger.info("Added meetings.%s column", column_name)
+
+    # Best-effort index for idempotency lookups.
+    index_exists_column = "indexname" if conn.dialect.name == "postgresql" else "name"
+    if conn.dialect.name == "postgresql":
+        exists = await conn.scalar(
+            text(
+                """
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'meetings'
+                  AND indexname = 'ix_meetings_session_id'
+                """
+            )
+        )
+    else:
+        exists = await conn.scalar(
+            text(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='index' AND name='ix_meetings_session_id'"
+            )
+        )
+    if not exists:
+        await conn.execute(
+            text("CREATE INDEX ix_meetings_session_id ON meetings (session_id)")
+        )
+        logger.info("Created meetings.session_id index (%s)", index_exists_column)
 
 
 async def init_db():
