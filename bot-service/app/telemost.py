@@ -9,6 +9,23 @@ logger = logging.getLogger(__name__)
 
 SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "/workspace/screenshots")
 
+# Safety-таймауты встречи. Не полагаемся только на DOM-детектор —
+# он ломается, если Telemost меняет строки/верстку.
+MAX_MEETING_DURATION_SECONDS = int(
+    os.getenv("MAX_MEETING_DURATION_SECONDS", str(4 * 60 * 60))
+)
+ALONE_TIMEOUT_SECONDS = int(os.getenv("ALONE_TIMEOUT_SECONDS", str(5 * 60)))
+
+_MEETING_ENDED_PHRASES = (
+    "встреча завершена",
+    "meeting ended",
+    "вы покинули",
+    "конференция завершена",
+    "вы вышли",
+    "you left the meeting",
+    "видеовстреча завершена",
+)
+
 # Chrome-флаги для WebRTC в контейнере
 # НЕ используем --use-fake-device-for-media-stream — это убивает реальный аудио-выход
 CHROME_ARGS = [
@@ -119,18 +136,28 @@ class TelemostSession:
         self._page.on("console", lambda msg: logger.debug("BROWSER: %s", msg.text))
 
         logger.info("Navigating to %s", self.meeting_url)
-        await self._page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
+        await self._page.goto(
+            self.meeting_url, wait_until="domcontentloaded", timeout=60000
+        )
         await self._screenshot("after_navigate")
         await asyncio.sleep(5)
 
         # Проверяем капчу — retry до 3 раз с паузой
         for attempt in range(3):
-            page_text = await self._page.evaluate("() => (document.body.innerText || '').substring(0, 500)")
-            if not any(w in page_text.lower() for w in ["captcha", "smartcaptcha", "robot"]):
+            page_text = await self._page.evaluate(
+                "() => (document.body.innerText || '').substring(0, 500)"
+            )
+            if not any(
+                w in page_text.lower() for w in ["captcha", "smartcaptcha", "robot"]
+            ):
                 break
-            logger.warning("SmartCaptcha detected (attempt %d/3), waiting 30s...", attempt + 1)
+            logger.warning(
+                "SmartCaptcha detected (attempt %d/3), waiting 30s...", attempt + 1
+            )
             if attempt == 2:
-                raise RuntimeError("Yandex SmartCaptcha — не удалось обойти после 3 попыток")
+                raise RuntimeError(
+                    "Yandex SmartCaptcha — не удалось обойти после 3 попыток"
+                )
             await asyncio.sleep(30)
             await self._page.reload(wait_until="domcontentloaded", timeout=30000)
         logger.info("Page text: %s", page_text.replace("\n", " | ")[:200])
@@ -157,7 +184,8 @@ class TelemostSession:
 
     async def _enter_name(self):
         """Ввести имя бота через JS — обходит React controlled inputs."""
-        entered = await self._page.evaluate("""
+        entered = await self._page.evaluate(
+            """
             (name) => {
                 const inputs = Array.from(document.querySelectorAll('input'));
                 const inp = inputs.find(i =>
@@ -174,7 +202,9 @@ class TelemostSession:
                 }
                 return false;
             }
-        """, self.bot_name)
+        """,
+            self.bot_name,
+        )
         if entered:
             logger.info("Entered bot name via JS")
         else:
@@ -238,25 +268,35 @@ class TelemostSession:
     async def _mute_chrome_mic(self):
         """Замьютить микрофон Chrome через PulseAudio."""
         import subprocess
+
         try:
             result = subprocess.run(
                 ["pactl", "list", "source-outputs", "short"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             for line in result.stdout.strip().split("\n"):
                 if line.strip():
                     idx = line.split()[0]
                     subprocess.run(
                         ["pactl", "set-source-output-mute", idx, "1"],
-                        check=False, timeout=5,
+                        check=False,
+                        timeout=5,
                     )
             logger.info("Muted Chrome mic via PulseAudio")
         except Exception as e:
             logger.warning("Failed to mute Chrome mic: %s", e)
 
     async def wait_for_end(self):
-        """Ждать завершения встречи."""
+        """Ждать завершения встречи.
+
+        Safety-net поверх DOM-детектора: max-duration и alone-timeout,
+        чтобы никогда не писать бесконечно, даже если строки UI поменяются.
+        """
         check_count = 0
+        started_at = time.monotonic()
+        alone_since: float | None = None
         while True:
             try:
                 await asyncio.wait_for(self._meeting_ended.wait(), timeout=5)
@@ -265,28 +305,55 @@ class TelemostSession:
             except asyncio.TimeoutError:
                 pass
 
+            elapsed = time.monotonic() - started_at
+            if elapsed >= MAX_MEETING_DURATION_SECONDS:
+                logger.warning(
+                    "Meeting exceeded MAX_MEETING_DURATION_SECONDS=%s — auto-leaving",
+                    MAX_MEETING_DURATION_SECONDS,
+                )
+                await self._screenshot("max_duration_reached")
+                break
+
             if self._page is None or self._page.is_closed():
                 logger.info("Page closed, meeting ended")
                 break
 
             try:
-                ended = await self._page.evaluate("""
-                    () => {
-                        const text = document.body ? document.body.innerText : '';
-                        if (text.includes('Встреча завершена') ||
-                            text.includes('Meeting ended') ||
-                            text.includes('Вы покинули') ||
-                            text.includes('Конференция завершена'))
-                            return 'ended';
-                        return 'active';
+                probe = await self._page.evaluate(
+                    """
+                    (phrases) => {
+                        const text = (document.body ? document.body.innerText : '').toLowerCase();
+                        for (const p of phrases) {
+                            if (text.includes(p)) return { state: 'ended', phrase: p };
+                        }
+                        const tiles = document.querySelectorAll('video, [data-testid*="participant"], [class*="participant" i], [class*="tile" i]');
+                        return { state: 'active', tiles: tiles.length };
                     }
-                """)
-                if ended == "ended":
-                    logger.info("Meeting ended (detected end screen)")
+                    """,
+                    list(_MEETING_ENDED_PHRASES),
+                )
+                if probe and probe.get("state") == "ended":
+                    logger.info(
+                        "Meeting ended (detected phrase: %s)",
+                        probe.get("phrase"),
+                    )
                     await self._screenshot("meeting_ended")
                     break
+
+                tiles = int(probe.get("tiles", 0)) if probe else 0
+                if tiles <= 1:
+                    if alone_since is None:
+                        alone_since = time.monotonic()
+                    elif time.monotonic() - alone_since >= ALONE_TIMEOUT_SECONDS:
+                        logger.warning(
+                            "Bot alone in the room for %ss — auto-leaving",
+                            ALONE_TIMEOUT_SECONDS,
+                        )
+                        await self._screenshot("alone_timeout_reached")
+                        break
+                else:
+                    alone_since = None
             except Exception:
-                # Page destroyed — meeting ended
                 logger.info("Page gone, meeting ended")
                 break
 
