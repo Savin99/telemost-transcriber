@@ -105,7 +105,13 @@ class ControlledTranscribe:
     async def __call__(self, recording_path: str, num_speakers: int | None = None):
         while not self._allow.is_set():
             await asyncio.sleep(0.01)
-        return [dict(segment) for segment in self._segments]
+        return {
+            "segments": [dict(segment) for segment in self._segments],
+            "ai_status": {
+                "speaker_refinement": "disabled",
+                "transcript_refinement": "disabled",
+            },
+        }
 
 
 class ControlledDriveUpload:
@@ -137,7 +143,9 @@ class ControlledDriveUpload:
     async def __call__(self, transcript: dict, *, source_filename: str | None = None):
         while not self._allow.is_set():
             await asyncio.sleep(0.01)
-        self.calls.append({"transcript": dict(transcript), "source_filename": source_filename})
+        self.calls.append(
+            {"transcript": dict(transcript), "source_filename": source_filename}
+        )
         if self.error is not None:
             raise self.error
         return dict(self.result)
@@ -174,7 +182,9 @@ class BotServiceContractTests(unittest.TestCase):
         importlib.invalidate_caches()
         return importlib.import_module("app.main")
 
-    def _wait_for_status(self, client: TestClient, meeting_id: str, expected_status: str) -> dict:
+    def _wait_for_status(
+        self, client: TestClient, meeting_id: str, expected_status: str
+    ) -> dict:
         deadline = time.time() + 5
         last_payload = None
         while time.time() < deadline:
@@ -184,7 +194,9 @@ class BotServiceContractTests(unittest.TestCase):
             if last_payload["status"] == expected_status:
                 return last_payload
             time.sleep(0.05)
-        self.fail(f"Timed out waiting for status {expected_status}; last payload: {last_payload}")
+        self.fail(
+            f"Timed out waiting for status {expected_status}; last payload: {last_payload}"
+        )
 
     def test_service_refuses_to_start_without_api_key(self):
         with patch.dict(os.environ, {"TELEMOST_SERVICE_API_KEY": ""}, clear=False):
@@ -198,7 +210,13 @@ class BotServiceContractTests(unittest.TestCase):
         with TestClient(self.main.app) as client:
             responses = [
                 client.get("/health"),
-                client.post("/join", json={"meeting_url": "https://telemost.yandex.ru/j/1", "bot_name": "Bot"}),
+                client.post(
+                    "/join",
+                    json={
+                        "meeting_url": "https://telemost.yandex.ru/j/1",
+                        "bot_name": "Bot",
+                    },
+                ),
                 client.post("/leave/fake-meeting-id"),
                 client.get("/status/fake-meeting-id"),
                 client.get("/transcripts/fake-meeting-id"),
@@ -212,7 +230,10 @@ class BotServiceContractTests(unittest.TestCase):
                 client.post(
                     "/join",
                     headers=wrong_key_headers,
-                    json={"meeting_url": "https://telemost.yandex.ru/j/1", "bot_name": "Bot"},
+                    json={
+                        "meeting_url": "https://telemost.yandex.ru/j/1",
+                        "bot_name": "Bot",
+                    },
                 ),
                 client.post("/leave/fake-meeting-id", headers=wrong_key_headers),
                 client.get("/status/fake-meeting-id", headers=wrong_key_headers),
@@ -226,15 +247,21 @@ class BotServiceContractTests(unittest.TestCase):
         transcribe = ControlledTranscribe(
             [
                 {"speaker": None, "start": 0.0, "end": 4.2, "text": "Добрый день"},
-                {"speaker": "Кандидат", "start": 4.3, "end": 9.1, "text": "Здравствуйте"},
+                {
+                    "speaker": "Кандидат",
+                    "start": 4.3,
+                    "end": 9.1,
+                    "text": "Здравствуйте",
+                },
             ]
         )
         drive_upload = ControlledDriveUpload()
 
-        with patch.object(self.main, "TelemostSession", ControlledTelemostSession), patch.object(
-            self.main, "AudioCapture", FakeAudioCapture
-        ), patch.object(self.main, "_transcribe", new=transcribe), patch.object(
-            self.main, "_upload_transcript_to_drive", new=drive_upload
+        with (
+            patch.object(self.main, "TelemostSession", ControlledTelemostSession),
+            patch.object(self.main, "AudioCapture", FakeAudioCapture),
+            patch.object(self.main, "_transcribe", new=transcribe),
+            patch.object(self.main, "_upload_transcript_to_drive", new=drive_upload),
         ):
             with TestClient(self.main.app) as client:
                 join_response = client.post(
@@ -248,18 +275,27 @@ class BotServiceContractTests(unittest.TestCase):
                 self.assertEqual(join_response.status_code, 200)
                 join_payload = join_response.json()
                 self.assertEqual(join_payload["status"], "pending")
-                self.assertEqual(join_payload["meeting_url"], "https://telemost.yandex.ru/j/abc")
-                self.assertRegex(join_payload["created_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+                self.assertEqual(
+                    join_payload["meeting_url"], "https://telemost.yandex.ru/j/abc"
+                )
+                self.assertRegex(
+                    join_payload["created_at"],
+                    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+                )
                 self.assertNotIn("duration_seconds", join_payload)
                 self.assertNotIn("error_message", join_payload)
 
                 meeting_id = join_payload["meeting_id"]
-                recording_payload = self._wait_for_status(client, meeting_id, "recording")
+                recording_payload = self._wait_for_status(
+                    client, meeting_id, "recording"
+                )
                 self.assertAlmostEqual(recording_payload["duration_seconds"], 321.5)
                 self.assertIsNone(recording_payload["error_message"])
                 self.assertIsNone(recording_payload["transcript_url"])
                 self.assertIsNone(recording_payload["drive_file"])
-                self.assertEqual(recording_payload["created_at"], join_payload["created_at"])
+                self.assertEqual(
+                    recording_payload["created_at"], join_payload["created_at"]
+                )
 
                 transcript_not_ready = client.get(
                     f"/transcripts/{meeting_id}",
@@ -267,13 +303,20 @@ class BotServiceContractTests(unittest.TestCase):
                 )
                 self.assertEqual(transcript_not_ready.status_code, 409)
 
-                leave_response = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                leave_response = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(leave_response.status_code, 200)
-                self.assertIn(leave_response.json()["status"], {"recording", "leaving", "transcribing", "done"})
+                self.assertIn(
+                    leave_response.json()["status"],
+                    {"recording", "leaving", "transcribing", "done"},
+                )
 
                 done_payload = self._wait_for_status(client, meeting_id, "done")
                 self.assertEqual(done_payload["meeting_id"], meeting_id)
-                self.assertEqual(done_payload["meeting_url"], "https://telemost.yandex.ru/j/abc")
+                self.assertEqual(
+                    done_payload["meeting_url"], "https://telemost.yandex.ru/j/abc"
+                )
                 self.assertAlmostEqual(done_payload["duration_seconds"], 321.5)
                 self.assertIsNone(done_payload["error_message"])
                 self.assertEqual(done_payload["created_at"], join_payload["created_at"])
@@ -291,7 +334,9 @@ class BotServiceContractTests(unittest.TestCase):
                     },
                 )
 
-                transcript_response = client.get(f"/transcripts/{meeting_id}", headers=self.headers)
+                transcript_response = client.get(
+                    f"/transcripts/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(transcript_response.status_code, 200)
                 self.assertEqual(
                     transcript_response.json(),
@@ -328,10 +373,11 @@ class BotServiceContractTests(unittest.TestCase):
         transcribe = ControlledTranscribe([], immediate=True)
         drive_upload = ControlledDriveUpload()
 
-        with patch.object(self.main, "TelemostSession", ControlledTelemostSession), patch.object(
-            self.main, "AudioCapture", FakeAudioCapture
-        ), patch.object(self.main, "_transcribe", new=transcribe), patch.object(
-            self.main, "_upload_transcript_to_drive", new=drive_upload
+        with (
+            patch.object(self.main, "TelemostSession", ControlledTelemostSession),
+            patch.object(self.main, "AudioCapture", FakeAudioCapture),
+            patch.object(self.main, "_transcribe", new=transcribe),
+            patch.object(self.main, "_upload_transcript_to_drive", new=drive_upload),
         ):
             with TestClient(self.main.app) as client:
                 join_response = client.post(
@@ -345,11 +391,15 @@ class BotServiceContractTests(unittest.TestCase):
                 self.assertEqual(join_response.status_code, 200)
                 meeting_id = join_response.json()["meeting_id"]
 
-                pending_status = client.get(f"/status/{meeting_id}", headers=self.headers)
+                pending_status = client.get(
+                    f"/status/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(pending_status.status_code, 200)
                 self.assertEqual(pending_status.json()["status"], "pending")
 
-                leave_response = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                leave_response = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(leave_response.status_code, 200)
                 self.assertEqual(leave_response.json()["status"], "error")
                 self.assertEqual(
@@ -365,7 +415,9 @@ class BotServiceContractTests(unittest.TestCase):
                     "Meeting was stopped before recording started",
                 )
 
-                transcript_response = client.get(f"/transcripts/{meeting_id}", headers=self.headers)
+                transcript_response = client.get(
+                    f"/transcripts/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(transcript_response.status_code, 409)
 
     def test_leave_is_idempotent_across_recording_leaving_transcribing_and_done(self):
@@ -378,10 +430,11 @@ class BotServiceContractTests(unittest.TestCase):
         )
         drive_upload = ControlledDriveUpload()
 
-        with patch.object(self.main, "TelemostSession", ControlledTelemostSession), patch.object(
-            self.main, "AudioCapture", FakeAudioCapture
-        ), patch.object(self.main, "_transcribe", new=transcribe), patch.object(
-            self.main, "_upload_transcript_to_drive", new=drive_upload
+        with (
+            patch.object(self.main, "TelemostSession", ControlledTelemostSession),
+            patch.object(self.main, "AudioCapture", FakeAudioCapture),
+            patch.object(self.main, "_transcribe", new=transcribe),
+            patch.object(self.main, "_upload_transcript_to_drive", new=drive_upload),
         ):
             with TestClient(self.main.app) as client:
                 join_response = client.post(
@@ -395,25 +448,37 @@ class BotServiceContractTests(unittest.TestCase):
                 meeting_id = join_response.json()["meeting_id"]
 
                 self._wait_for_status(client, meeting_id, "recording")
-                recording_leave = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                recording_leave = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(recording_leave.status_code, 200)
-                self.assertIn(recording_leave.json()["status"], {"recording", "leaving"})
+                self.assertIn(
+                    recording_leave.json()["status"], {"recording", "leaving"}
+                )
 
                 leaving_payload = self._wait_for_status(client, meeting_id, "leaving")
                 self.assertEqual(leaving_payload["status"], "leaving")
-                leaving_leave = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                leaving_leave = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(leaving_leave.status_code, 200)
                 self.assertEqual(leaving_leave.json()["status"], "leaving")
 
                 ControlledTelemostSession._allow_leave.set()
-                transcribing_payload = self._wait_for_status(client, meeting_id, "transcribing")
+                transcribing_payload = self._wait_for_status(
+                    client, meeting_id, "transcribing"
+                )
                 self.assertEqual(transcribing_payload["status"], "transcribing")
 
-                transcribing_leave = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                transcribing_leave = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(transcribing_leave.status_code, 200)
                 self.assertEqual(transcribing_leave.json()["status"], "transcribing")
 
-                transcript_not_ready = client.get(f"/transcripts/{meeting_id}", headers=self.headers)
+                transcript_not_ready = client.get(
+                    f"/transcripts/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(transcript_not_ready.status_code, 409)
 
                 transcribe.allow()
@@ -432,13 +497,16 @@ class BotServiceContractTests(unittest.TestCase):
             ]
         )
         drive_upload = ControlledDriveUpload(
-            error=RuntimeError("Google Drive upload failed or returned incomplete metadata")
+            error=RuntimeError(
+                "Google Drive upload failed or returned incomplete metadata"
+            )
         )
 
-        with patch.object(self.main, "TelemostSession", ControlledTelemostSession), patch.object(
-            self.main, "AudioCapture", FakeAudioCapture
-        ), patch.object(self.main, "_transcribe", new=transcribe), patch.object(
-            self.main, "_upload_transcript_to_drive", new=drive_upload
+        with (
+            patch.object(self.main, "TelemostSession", ControlledTelemostSession),
+            patch.object(self.main, "AudioCapture", FakeAudioCapture),
+            patch.object(self.main, "_transcribe", new=transcribe),
+            patch.object(self.main, "_upload_transcript_to_drive", new=drive_upload),
         ):
             with TestClient(self.main.app) as client:
                 join_response = client.post(
@@ -452,7 +520,9 @@ class BotServiceContractTests(unittest.TestCase):
                 meeting_id = join_response.json()["meeting_id"]
 
                 self._wait_for_status(client, meeting_id, "recording")
-                leave_response = client.post(f"/leave/{meeting_id}", headers=self.headers)
+                leave_response = client.post(
+                    f"/leave/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(leave_response.status_code, 200)
 
                 error_payload = self._wait_for_status(client, meeting_id, "error")
@@ -463,7 +533,9 @@ class BotServiceContractTests(unittest.TestCase):
                 self.assertIsNone(error_payload["transcript_url"])
                 self.assertIsNone(error_payload["drive_file"])
 
-                transcript_response = client.get(f"/transcripts/{meeting_id}", headers=self.headers)
+                transcript_response = client.get(
+                    f"/transcripts/{meeting_id}", headers=self.headers
+                )
                 self.assertEqual(transcript_response.status_code, 409)
 
 

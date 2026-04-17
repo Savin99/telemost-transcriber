@@ -20,7 +20,9 @@ class FakeRefiner:
     def refine(self, segments):
         self.calls += 1
         return [
-            segment if index != 1 else TranscribedSegment(
+            segment
+            if index != 1
+            else TranscribedSegment(
                 speaker="Ольга",
                 start=segment.start,
                 end=segment.end,
@@ -73,7 +75,9 @@ class SpeakerRefinerTests(unittest.TestCase):
         pipeline.speaker_llm_refinement_enabled = False
         segments = [TranscribedSegment("Вячеслав Т.", 0.0, 1.0, "Привет")]
 
-        self.assertIs(pipeline._refine_speakers_with_llm(segments), segments)
+        refined, status = pipeline._refine_speakers_with_llm(segments)
+        self.assertIs(refined, segments)
+        self.assertEqual(status, "disabled")
 
     def test_pipeline_calls_refiner_when_enabled(self):
         pipeline = TranscriberPipeline(device="cpu")
@@ -84,10 +88,11 @@ class SpeakerRefinerTests(unittest.TestCase):
             TranscribedSegment("Вячеслав Т.", 1.1, 1.4, "Да."),
         ]
 
-        refined = pipeline._refine_speakers_with_llm(segments)
+        refined, status = pipeline._refine_speakers_with_llm(segments)
 
         self.assertEqual(pipeline._speaker_refiner.calls, 1)
         self.assertEqual(refined[1].speaker, "Ольга")
+        self.assertTrue(status.startswith("applied"))
 
 
 if __name__ == "__main__":
