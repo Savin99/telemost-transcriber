@@ -60,7 +60,11 @@ class SpeakerIdentifier:
         tensor = torch.as_tensor(waveform, dtype=torch.float32)
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
-        elif tensor.ndim == 2 and tensor.shape[0] > tensor.shape[1] and tensor.shape[1] <= 2:
+        elif (
+            tensor.ndim == 2
+            and tensor.shape[0] > tensor.shape[1]
+            and tensor.shape[1] <= 2
+        ):
             tensor = tensor.transpose(0, 1)
         elif tensor.ndim != 2:
             raise ValueError(f"Unsupported waveform shape: {tuple(tensor.shape)}")
@@ -89,8 +93,15 @@ class SpeakerIdentifier:
         cluster_embeddings: dict[str, np.ndarray],
         voice_bank,
         threshold: float = 0.40,
+        allowed_names: set[str] | None = None,
     ) -> dict[str, IdentificationResult]:
         centroids = voice_bank.get_all_centroids()
+        if allowed_names is not None:
+            centroids = {
+                name: centroid
+                for name, centroid in centroids.items()
+                if name in allowed_names
+            }
         results: dict[str, IdentificationResult] = {}
 
         if not cluster_embeddings:

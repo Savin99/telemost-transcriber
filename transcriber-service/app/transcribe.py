@@ -51,7 +51,7 @@ def normalize_review_speaker_name(name: str) -> str:
         lowered = candidate.casefold()
         for prefix in REVIEW_NAME_PREFIXES:
             if lowered.startswith(prefix):
-                stripped = candidate[len(prefix):].strip(" \t-:,!?")
+                stripped = candidate[len(prefix) :].strip(" \t-:,!?")
                 if stripped:
                     candidate = stripped
                     changed = True
@@ -78,9 +78,35 @@ class AiStatus:
 
 
 @dataclass
+class SpeakerHint:
+    """Подсказка для идентификации/авто-энроллмента.
+
+    Поле ``role`` — произвольный идентификатор роли (``recruiter`` / ``candidate``),
+    используется только для маппинга в результате. ``person_id`` прокидывается
+    из потребителя, чтобы вернуть его в ``enrolled_voiceprints``.
+    """
+
+    display_name: str
+    enrolled: bool
+    voice_bank_id: Optional[str] = None
+    role: Optional[str] = None
+    person_id: Optional[int] = None
+
+
+@dataclass
+class EnrolledVoiceprint:
+    voice_bank_id: str
+    display_name: str
+    person_id: Optional[int] = None
+    role: Optional[str] = None
+
+
+@dataclass
 class TranscribeResult:
     segments: list[TranscribedSegment]
     ai_status: AiStatus = field(default_factory=AiStatus)
+    enrolled_voiceprints: list[EnrolledVoiceprint] = field(default_factory=list)
+    speaker_roles: dict[str, str] = field(default_factory=dict)
 
 
 class TranscriberPipeline:
@@ -89,6 +115,7 @@ class TranscriberPipeline:
     def __init__(self, device: str = "auto"):
         if device == "auto":
             import torch
+
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
@@ -133,6 +160,7 @@ class TranscriberPipeline:
     def asr_model(self):
         if self._asr_model is None:
             import whisperx
+
             self._asr_model = whisperx.load_model(
                 "large-v3",
                 device=self.device,
@@ -207,7 +235,9 @@ class TranscriberPipeline:
                 params = {
                     "clustering": {
                         "method": "centroid",
-                        "min_cluster_size": int(os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")),
+                        "min_cluster_size": int(
+                            os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")
+                        ),
                         "threshold": float(os.getenv("CLUSTERING_THRESHOLD", "0.55")),
                     },
                     "segmentation": {"min_duration_off": 0.0},
@@ -215,7 +245,9 @@ class TranscriberPipeline:
 
             self._diarize_model.model.instantiate(params)
             logger.info(
-                "Diarization model loaded: %s, params: %s", model_name, params,
+                "Diarization model loaded: %s, params: %s",
+                model_name,
+                params,
             )
 
         return self._diarize_model
@@ -306,7 +338,9 @@ class TranscriberPipeline:
     ) -> dict[str, Any]:
         bundle = self.voice_bank.load_meeting_bundle_by_key(meeting_key)
         if bundle is None:
-            raise FileNotFoundError(f"Review bundle not found for meeting {meeting_key}")
+            raise FileNotFoundError(
+                f"Review bundle not found for meeting {meeting_key}"
+            )
 
         mapping = bundle.get("mapping", {})
         current_assignment = mapping.get(speaker_label)
@@ -345,7 +379,11 @@ class TranscriberPipeline:
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
-    ) -> list[TranscribedSegment]:
+        *,
+        speakers_hint: list[SpeakerHint] | None = None,
+        auto_enroll_unknown: bool = False,
+        initial_prompt: str | None = None,
+    ) -> TranscribeResult:
         """Транскрипция + alignment + диаризация."""
         import whisperx
 
@@ -358,6 +396,8 @@ class TranscriberPipeline:
             transcribe_kwargs: dict[str, Any] = {"batch_size": 16}
             if self.asr_language:
                 transcribe_kwargs["language"] = self.asr_language
+            if initial_prompt:
+                transcribe_kwargs["initial_prompt"] = initial_prompt
             result = self.asr_model.transcribe(audio, **transcribe_kwargs)
             logger.info("ASR produced %d segments", len(result["segments"]))
 
@@ -370,8 +410,12 @@ class TranscriberPipeline:
                 result["segments"], model_a, metadata, audio, device=self.device
             )
 
+            allowed_names = self._allowed_names_from_hints(speakers_hint)
+
             diarize_pipeline = self.diarize_model
             mapping: dict[str, IdentificationResult] = {}
+            cluster_profiles: dict[str, dict[str, Any]] = {}
+            diarize_segments = None
             if diarize_pipeline is not None:
                 diarize_segments, speaker_embeddings = self._run_diarization(
                     diarize_pipeline,
@@ -394,6 +438,7 @@ class TranscriberPipeline:
                     diarization=diarize_segments,
                     speaker_embeddings=speaker_embeddings,
                     ordered_labels=ordered_labels,
+                    allowed_names=allowed_names,
                 )
                 self.voice_bank.save_meeting_bundle(
                     audio_path=audio_path,
@@ -403,15 +448,31 @@ class TranscriberPipeline:
                     ordered_labels=ordered_labels,
                 )
 
+            enrolled_voiceprints = self._auto_enroll_from_hints(
+                audio_path=audio_path,
+                cluster_profiles=cluster_profiles,
+                mapping=mapping,
+                speakers_hint=speakers_hint,
+                auto_enroll_unknown=auto_enroll_unknown,
+            )
+
             # 3. Формирование результата
             ai_status = AiStatus()
             segments = self._build_transcribed_segments(result["segments"], mapping)
             segments = self._repair_short_replies(segments)
-            segments, ai_status.speaker_refinement = self._refine_speakers_with_llm(segments)
-            segments, ai_status.transcript_refinement = self._refine_transcript_text_with_llm(segments)
+            segments, ai_status.speaker_refinement = self._refine_speakers_with_llm(
+                segments
+            )
+            segments, ai_status.transcript_refinement = (
+                self._refine_transcript_text_with_llm(segments)
+            )
             seen_names = {
                 segment.speaker for segment in segments if segment.speaker is not None
             }
+
+            speaker_roles = self._build_speaker_roles(
+                speakers_hint, enrolled_voiceprints
+            )
 
             logger.info(
                 "Transcription complete: %d segments, %d speakers, ai_status=%s",
@@ -419,7 +480,114 @@ class TranscriberPipeline:
                 len(seen_names),
                 ai_status,
             )
-            return TranscribeResult(segments=segments, ai_status=ai_status)
+            return TranscribeResult(
+                segments=segments,
+                ai_status=ai_status,
+                enrolled_voiceprints=enrolled_voiceprints,
+                speaker_roles=speaker_roles,
+            )
+
+    @staticmethod
+    def _allowed_names_from_hints(
+        speakers_hint: list[SpeakerHint] | None,
+    ) -> set[str] | None:
+        if not speakers_hint:
+            return None
+        names = {
+            hint.display_name
+            for hint in speakers_hint
+            if hint.enrolled and hint.display_name
+        }
+        return names or set()
+
+    def _auto_enroll_from_hints(
+        self,
+        audio_path: str,
+        cluster_profiles: dict[str, dict[str, Any]],
+        mapping: dict[str, IdentificationResult],
+        speakers_hint: list[SpeakerHint] | None,
+        auto_enroll_unknown: bool,
+    ) -> list[EnrolledVoiceprint]:
+        if not auto_enroll_unknown or not speakers_hint or not cluster_profiles:
+            return []
+        unenrolled_hints = [hint for hint in speakers_hint if not hint.enrolled]
+        if len(unenrolled_hints) != 1:
+            logger.info(
+                "Skipping auto-enroll: expected exactly 1 unenrolled hint, got %d",
+                len(unenrolled_hints),
+            )
+            return []
+        unknown_clusters = [
+            label for label, result in mapping.items() if not result.is_known
+        ]
+        if len(unknown_clusters) != 1:
+            logger.info(
+                "Skipping auto-enroll: expected exactly 1 unknown cluster, got %d",
+                len(unknown_clusters),
+            )
+            return []
+
+        hint = unenrolled_hints[0]
+        target_cluster = unknown_clusters[0]
+        registry = self._voice_bank_registry_instance()
+        display_name = hint.display_name.strip()
+        if not display_name:
+            logger.warning("Skipping auto-enroll: hint display_name is empty")
+            return []
+
+        try:
+            self.voice_bank.learn_from_diarization_label(
+                name=display_name,
+                audio_path=audio_path,
+                diarization={"cluster_profiles": cluster_profiles},
+                speaker_label=target_cluster,
+            )
+        except Exception as exc:
+            logger.warning("Auto-enroll failed for cluster %s: %s", target_cluster, exc)
+            return []
+
+        assigned_id = registry.assign(display_name, hint.voice_bank_id)
+        mapping[target_cluster] = IdentificationResult(
+            name=display_name,
+            confidence=1.0,
+            is_known=True,
+        )
+        logger.info(
+            "Auto-enrolled cluster %s as %s (voice_bank_id=%s)",
+            target_cluster,
+            display_name,
+            assigned_id,
+        )
+        return [
+            EnrolledVoiceprint(
+                voice_bank_id=assigned_id,
+                display_name=display_name,
+                person_id=hint.person_id,
+                role=hint.role,
+            )
+        ]
+
+    def _voice_bank_registry_instance(self):
+        from .voice_bank_registry import VoiceBankRegistry
+
+        return VoiceBankRegistry(
+            os.path.join(str(self.voice_bank.root_dir), "voice_bank_ids.json")
+        )
+
+    @staticmethod
+    def _build_speaker_roles(
+        speakers_hint: list[SpeakerHint] | None,
+        enrolled_voiceprints: list[EnrolledVoiceprint],
+    ) -> dict[str, str]:
+        roles: dict[str, str] = {}
+        if speakers_hint:
+            for hint in speakers_hint:
+                if hint.role and hint.display_name:
+                    roles[hint.display_name] = hint.role
+        for entry in enrolled_voiceprints:
+            if entry.role and entry.display_name:
+                roles[entry.display_name] = entry.role
+        return roles
 
     def _refine_speakers_with_llm(
         self,
@@ -429,7 +597,9 @@ class TranscriberPipeline:
             return segments, "disabled"
         try:
             refined = self.speaker_refiner.refine(segments)
-            changed = sum(1 for a, b in zip(segments, refined) if a.speaker != b.speaker)
+            changed = sum(
+                1 for a, b in zip(segments, refined) if a.speaker != b.speaker
+            )
             return refined, f"applied ({changed} changes)"
         except Exception as exc:
             logger.warning("Speaker LLM refinement failed: %s", exc)
@@ -492,7 +662,9 @@ class TranscriberPipeline:
             if not text:
                 continue
 
-            speaker = self._map_speaker_name(word.get("speaker"), mapping) or fallback_speaker
+            speaker = (
+                self._map_speaker_name(word.get("speaker"), mapping) or fallback_speaker
+            )
             start = float(word.get("start", segment["start"]))
             end = float(word.get("end", start))
             if current_chunk is None or current_chunk["speaker"] != speaker:
@@ -739,6 +911,7 @@ class TranscriberPipeline:
         diarization,
         speaker_embeddings,
         ordered_labels: list[str],
+        allowed_names: set[str] | None = None,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, IdentificationResult]]:
         cluster_profiles = self._extract_cluster_profiles(
             normalized_audio_path=normalized_audio_path,
@@ -762,6 +935,7 @@ class TranscriberPipeline:
             cluster_embeddings=cluster_embeddings,
             voice_bank=self.voice_bank,
             threshold=self.voice_match_threshold,
+            allowed_names=allowed_names,
         )
 
         used_unknown_names = {
@@ -912,7 +1086,9 @@ class TranscriberPipeline:
             )
             profile["segments"].append({"start": start, "end": end})
 
-        native_embeddings = self._normalize_native_speaker_embeddings(speaker_embeddings)
+        native_embeddings = self._normalize_native_speaker_embeddings(
+            speaker_embeddings
+        )
         if self._can_use_native_speaker_embeddings() and native_embeddings:
             for speaker_label, embedding in native_embeddings.items():
                 profile = cluster_profiles.setdefault(
@@ -960,7 +1136,9 @@ class TranscriberPipeline:
 
         return cluster_profiles
 
-    def _normalize_native_speaker_embeddings(self, speaker_embeddings) -> dict[str, np.ndarray]:
+    def _normalize_native_speaker_embeddings(
+        self, speaker_embeddings
+    ) -> dict[str, np.ndarray]:
         if not speaker_embeddings:
             return {}
         if not hasattr(speaker_embeddings, "items"):

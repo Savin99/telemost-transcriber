@@ -78,18 +78,27 @@ class FakeIdentifier:
             raise AssertionError("Embedding queue exhausted")
         return self.embeddings.pop(0)
 
-    def identify_speakers(self, cluster_embeddings, voice_bank, threshold=0.40):
+    def identify_speakers(
+        self,
+        cluster_embeddings,
+        voice_bank,
+        threshold=0.40,
+        allowed_names=None,
+    ):
         return self._matcher.identify_speakers(
             cluster_embeddings=cluster_embeddings,
             voice_bank=voice_bank,
             threshold=threshold,
+            allowed_names=allowed_names,
         )
 
 
 class FakeVoiceBank:
-    def __init__(self, centroids):
+    def __init__(self, centroids, root_dir=None):
         self.centroids = centroids
         self.saved_bundles = []
+        self.learn_calls = []
+        self.root_dir = Path(root_dir or "/tmp/fake-voice-bank")
 
     def get_all_centroids(self):
         return self.centroids
@@ -100,6 +109,24 @@ class FakeVoiceBank:
 
     def meeting_key_for(self, audio_path: str) -> str:
         return "fake-meeting"
+
+    def learn_from_diarization_label(
+        self,
+        name,
+        audio_path,
+        diarization,
+        speaker_label,
+        alpha=0.05,
+    ):
+        self.learn_calls.append(
+            {
+                "name": name,
+                "audio_path": audio_path,
+                "speaker_label": speaker_label,
+                "alpha": alpha,
+            }
+        )
+        return IdentificationResult(name=name, confidence=1.0, is_known=True)
 
 
 def _fake_whisperx_module():
@@ -548,6 +575,224 @@ class TranscriberPipelineTests(unittest.TestCase):
                 {speaker["name"] for speaker in voice_bank.list_speakers()},
                 {"Азиз"},
             )
+
+
+class SpeakerHintAndAutoEnrollTests(unittest.TestCase):
+    def _make_pipeline(
+        self,
+        asr_segments,
+        diarization_segments,
+        identifier_embeddings,
+        centroids,
+        speaker_embeddings=None,
+        root_dir=None,
+    ):
+        pipeline = TranscriberPipeline(device="cpu")
+        pipeline._asr_model = FakeAsrModel(asr_segments)
+        pipeline._diarize_model = FakeDiarizePipeline(
+            diarization_segments, speaker_embeddings
+        )
+        pipeline._speaker_identifier = FakeIdentifier(identifier_embeddings)
+        pipeline._voice_bank = FakeVoiceBank(centroids, root_dir=root_dir)
+        return pipeline
+
+    def test_initial_prompt_is_forwarded_to_asr(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            pipeline = self._make_pipeline(
+                asr_segments=[{"start": 0.0, "end": 1.2, "text": "Привет"}],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                ],
+                identifier_embeddings=[[1.0, 0.0]],
+                centroids={},
+                root_dir=temp_dir,
+            )
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                    clear=False,
+                ):
+                    pipeline.transcribe(
+                        str(audio_path),
+                        initial_prompt="Интервью с Python-разработчиком.",
+                    )
+            self.assertEqual(
+                pipeline.asr_model.transcribe_calls[0]["initial_prompt"],
+                "Интервью с Python-разработчиком.",
+            )
+
+    def test_allowed_names_filter_restricts_matching(self):
+        """speakers_hint с enrolled=True подбирает только указанные голоса."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            centroids = {
+                "Alice": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                "Bob": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+            }
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 1.2, "text": "Hi"},
+                    {"start": 1.2, "end": 2.4, "text": "Bye"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    {"start": 1.2, "end": 2.4, "speaker": "SPEAKER_01"},
+                ],
+                identifier_embeddings=[[1.0, 0.0], [0.0, 1.0]],
+                centroids=centroids,
+                speaker_embeddings={
+                    "SPEAKER_00": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                    "SPEAKER_01": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                },
+                root_dir=temp_dir,
+            )
+
+            from app.transcribe import SpeakerHint
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                    clear=False,
+                ):
+                    result = pipeline.transcribe(
+                        str(audio_path),
+                        speakers_hint=[
+                            SpeakerHint(
+                                display_name="Alice",
+                                enrolled=True,
+                                voice_bank_id="alice-1",
+                                role="recruiter",
+                            ),
+                        ],
+                    )
+            speakers = [segment.speaker for segment in result.segments]
+            # Alice подбирается; Bob должен быть игнорирован (не в allowed_names),
+            # поэтому SPEAKER_01 остаётся Unknown.
+            self.assertIn("Alice", speakers)
+            self.assertNotIn("Bob", speakers)
+
+    def test_auto_enroll_single_unknown_cluster_returns_voiceprint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 1.2, "text": "Hi"},
+                    {"start": 1.2, "end": 2.4, "text": "Bye"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    {"start": 1.2, "end": 2.4, "speaker": "SPEAKER_01"},
+                ],
+                identifier_embeddings=[[1.0, 0.0], [0.0, 1.0]],
+                centroids={
+                    "Alice": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                },
+                speaker_embeddings={
+                    "SPEAKER_00": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                    "SPEAKER_01": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                },
+                root_dir=temp_dir,
+            )
+
+            from app.transcribe import SpeakerHint
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                    clear=False,
+                ):
+                    result = pipeline.transcribe(
+                        str(audio_path),
+                        speakers_hint=[
+                            SpeakerHint(
+                                display_name="Alice",
+                                enrolled=True,
+                                voice_bank_id="alice-1",
+                                role="recruiter",
+                            ),
+                            SpeakerHint(
+                                display_name="Boris",
+                                enrolled=False,
+                                role="candidate",
+                                person_id=42,
+                            ),
+                        ],
+                        auto_enroll_unknown=True,
+                    )
+
+            self.assertEqual(len(result.enrolled_voiceprints), 1)
+            voiceprint = result.enrolled_voiceprints[0]
+            self.assertEqual(voiceprint.display_name, "Boris")
+            self.assertEqual(voiceprint.role, "candidate")
+            self.assertEqual(voiceprint.person_id, 42)
+            self.assertTrue(voiceprint.voice_bank_id.startswith("boris-"))
+            # Segments должны содержать имя, а не Unknown Speaker.
+            speaker_names = {seg.speaker for seg in result.segments}
+            self.assertIn("Boris", speaker_names)
+            # Реестр записал ID.
+            import json as _json
+
+            registry_path = Path(temp_dir) / "voice_bank_ids.json"
+            self.assertTrue(registry_path.exists())
+            payload = _json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertIn(voiceprint.voice_bank_id, payload["entries"])
+            self.assertEqual(payload["entries"][voiceprint.voice_bank_id], "Boris")
+
+    def test_auto_enroll_skipped_with_multiple_unknown_clusters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(audio_path)
+            pipeline = self._make_pipeline(
+                asr_segments=[
+                    {"start": 0.0, "end": 1.2, "text": "One"},
+                    {"start": 1.2, "end": 2.4, "text": "Two"},
+                    {"start": 2.4, "end": 3.6, "text": "Three"},
+                ],
+                diarization_segments=[
+                    {"start": 0.0, "end": 1.2, "speaker": "SPEAKER_00"},
+                    {"start": 1.2, "end": 2.4, "speaker": "SPEAKER_01"},
+                    {"start": 2.4, "end": 3.6, "speaker": "SPEAKER_02"},
+                ],
+                identifier_embeddings=[[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
+                centroids={},
+                speaker_embeddings={
+                    "SPEAKER_00": l2_normalize(np.array([1.0, 0.0], dtype=np.float32)),
+                    "SPEAKER_01": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                    "SPEAKER_02": l2_normalize(np.array([0.5, 0.5], dtype=np.float32)),
+                },
+                root_dir=temp_dir,
+            )
+
+            from app.transcribe import SpeakerHint
+
+            with patch.dict("sys.modules", {"whisperx": _fake_whisperx_module()}):
+                with patch.dict(
+                    "os.environ",
+                    {"DIARIZATION_MODEL": "pyannote/speaker-diarization-community-1"},
+                    clear=False,
+                ):
+                    result = pipeline.transcribe(
+                        str(audio_path),
+                        speakers_hint=[
+                            SpeakerHint(
+                                display_name="Boris",
+                                enrolled=False,
+                                role="candidate",
+                                person_id=42,
+                            ),
+                        ],
+                        auto_enroll_unknown=True,
+                    )
+
+            self.assertEqual(result.enrolled_voiceprints, [])
+            self.assertEqual(len(pipeline.voice_bank.learn_calls), 0)
 
 
 if __name__ == "__main__":
