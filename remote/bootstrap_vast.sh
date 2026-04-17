@@ -80,6 +80,18 @@ stdout_logfile_backups=3
 redirect_stderr=true
 startsecs=60
 
+[program:tg-bot]
+command=/bin/bash -lc "source /workspace/.bashrc; cd /workspace/telemost-transcriber/tg-bot; exec /venv/main/bin/python bot.py"
+autostart=true
+autorestart=true
+startretries=999
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/workspace/logs/tg-bot.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=3
+redirect_stderr=true
+
 [program:drive-watcher]
 command=/bin/bash -lc "source /workspace/.bashrc; cd /workspace/telemost-transcriber/tg-bot; exec /venv/main/bin/python drive_watcher.py"
 autostart=true
@@ -92,8 +104,11 @@ stdout_logfile_maxbytes=20MB
 stdout_logfile_backups=3
 redirect_stderr=true
 
+# ВНИМАНИЕ: любое изменение transcribe-stack.conf + supervisorctl update
+# перезапускает ВСЮ группу — включая активные записи встреч.
+# Проверяй /meetings?status=recording перед правкой на проде.
 [group:transcribe-stack]
-programs=bot-service,transcriber-service,drive-watcher
+programs=bot-service,transcriber-service,tg-bot,drive-watcher
 CONF
 
 cat > /etc/supervisor/conf.d/reverse-tunnel.conf <<CONF
@@ -155,17 +170,27 @@ TOKEN="${TG_BOT_TOKEN:-}"
 CHAT="${TG_ALERT_CHAT_ID:-}"
 KEY="${TELEMOST_SERVICE_API_KEY:-}"
 ok=1
-curl -sf -m 10 -H "X-API-Key: $KEY" http://localhost:8000/health >/dev/null || ok=0
-curl -sf -m 10 http://localhost:8001/health >/dev/null || ok=0
+fail_reasons=""
+curl -sf -m 10 -H "X-API-Key: $KEY" http://localhost:8000/health >/dev/null \
+    || { ok=0; fail_reasons="${fail_reasons} bot-service"; }
+curl -sf -m 10 http://localhost:8001/health >/dev/null \
+    || { ok=0; fail_reasons="${fail_reasons} transcriber"; }
+for svc in tg-bot drive-watcher; do
+    state=$(supervisorctl status "transcribe-stack:${svc}" 2>/dev/null | awk '{print $2}')
+    if [ "$state" != "RUNNING" ]; then
+        ok=0
+        fail_reasons="${fail_reasons} ${svc}:${state:-unknown}"
+    fi
+done
 prev=$(cat "$STATE" 2>/dev/null || echo 0)
 if [ "$ok" -eq 0 ]; then
     new=$((prev + 1))
     echo "$new" > "$STATE"
-    echo "$(date -Is) health FAIL (consecutive=$new)" >> "$LOG"
+    echo "$(date -Is) health FAIL (consecutive=$new) reasons:${fail_reasons}" >> "$LOG"
     if [ "$new" -eq 3 ] && [ -n "$TOKEN" ] && [ -n "$CHAT" ]; then
         curl -sf -m 10 "https://api.telegram.org/bot${TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${CHAT}" \
-            --data-urlencode "text=⚠️ transcribe stack health FAIL 3× на $(hostname)" >/dev/null || true
+            --data-urlencode "text=⚠️ transcribe stack health FAIL 3× на $(hostname):${fail_reasons}" >/dev/null || true
     fi
 else
     if [ "$prev" -gt 0 ] && [ -n "$TOKEN" ] && [ -n "$CHAT" ]; then
@@ -183,6 +208,30 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */5 * * * * root /usr/local/bin/health_watchdog.sh
 CRON
 chmod 644 /etc/cron.d/health_watchdog
+
+# --- Ротация старых .wav, чтобы диск не забивался ---
+cat > /usr/local/bin/rotate_recordings.sh <<'RR'
+#!/usr/bin/env bash
+# Удаляем .wav старше RECORDINGS_TTL_DAYS (default 7).
+# Транскрипт к этому моменту уже на Drive; .wav нужен только
+# для повторной разметки голосов через /voices.
+set -u
+DIR="${RECORDINGS_DIR:-/workspace/recordings}"
+TTL="${RECORDINGS_TTL_DAYS:-7}"
+LOG="/workspace/logs/rotate_recordings.log"
+mkdir -p "$(dirname "$LOG")"
+if [ -d "$DIR" ]; then
+    count=$(find "$DIR" -maxdepth 1 -type f -name '*.wav' -mtime +"$TTL" -print -delete 2>>"$LOG" | wc -l)
+    echo "$(date -Is) removed=$count dir=$DIR ttl=${TTL}d" >> "$LOG"
+fi
+RR
+chmod +x /usr/local/bin/rotate_recordings.sh
+
+cat > /etc/cron.d/rotate_recordings <<CRON
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 4 * * * root /usr/local/bin/rotate_recordings.sh
+CRON
+chmod 644 /etc/cron.d/rotate_recordings
 
 # --- Восстановление voice_bank из VDS (если есть backup) ---
 if ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@${VDS_HOST} \
