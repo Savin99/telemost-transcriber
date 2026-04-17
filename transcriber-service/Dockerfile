@@ -3,15 +3,19 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Python 3.11 + системные зависимости
+# Python 3.12 + системные зависимости
 RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3.11-venv \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     python3-pip \
     ffmpeg \
     git \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,8 +24,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# WhisperX из main — поддержка community-1 + pyannote 4.0
-RUN pip install --no-cache-dir "whisperx @ git+https://github.com/m-bain/whisperX.git"
+# WhisperX pinned: поддержка community-1 + pyannote 4.0
+RUN pip install --no-cache-dir "whisperx @ git+https://github.com/m-bain/whisperX.git@v3.8.5"
 
 # FastAPI и зависимости
 COPY requirements.txt .

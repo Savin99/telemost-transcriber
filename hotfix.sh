@@ -40,7 +40,7 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}▶ $1${NC}"; }
 warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
 
-RSYNC_OPTS="-avz --delete --exclude='__pycache__' --exclude='*.pyc' --exclude='.env' --exclude='recordings/' --exclude='.git'"
+RSYNC_OPTS="-avz --delete --exclude='__pycache__' --exclude='*.pyc' --exclude='.env' --exclude='.env.deploy' --exclude='credentials/' --exclude='recordings/' --exclude='.git'"
 
 # --- Копируем скрипт рестарта ---
 upload_restart_script() {

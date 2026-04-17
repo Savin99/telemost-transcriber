@@ -7,18 +7,49 @@
 #   bash restart_service.sh watcher      — рестарт drive-watcher
 #   bash restart_service.sh bot          — рестарт bot-service
 #   bash restart_service.sh transcriber  — рестарт transcriber-service
-#   bash restart_service.sh all          — рестарт tg + watcher + bot (без transcriber)
+#   bash restart_service.sh all          — рестарт всех 4 сервисов (включая transcriber, +2 мин прогрев)
 #   bash restart_service.sh health       — только проверка health
 set -euo pipefail
 
 # --- Константы ---
 APP_DIR="/workspace/telemost-transcriber"
 LOG_DIR="/workspace/logs"
+DEPS_CACHE_DIR="/workspace/.deps_cache"
 PIP="/venv/main/bin/pip"
 PYTHON="/venv/main/bin/python"
 
 # --- Загрузка env из .bashrc ---
 source /workspace/.bashrc 2>/dev/null || true
+
+mkdir -p "$DEPS_CACHE_DIR"
+
+# --- Хеш-кеш для pip install ---
+# install_if_changed <service_name> <hash_input_files...> -- <pip_command>
+# Пропускает переустановку зависимостей, если хеш входных файлов не изменился.
+install_if_changed() {
+    local service="$1"
+    shift
+    local files=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+        files+=("$1")
+        shift
+    done
+    shift  # съедаем "--"
+    local marker="$DEPS_CACHE_DIR/$service.hash"
+    local current_hash
+    current_hash="$(cat "${files[@]}" 2>/dev/null | md5sum | awk '{print $1}')"
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = "$current_hash" ]; then
+        log "$service: зависимости не изменились, пропускаю pip install"
+        return 0
+    fi
+    log "$service: обновляю зависимости..."
+    if "$@"; then
+        echo "$current_hash" > "$marker"
+    else
+        err "$service: pip install упал"
+        return 1
+    fi
+}
 
 # --- Цвета ---
 GREEN='\033[0;32m'
@@ -48,7 +79,8 @@ restart_tg() {
     sleep 1
 
     cd "$APP_DIR/tg-bot"
-    $PIP install --quiet --disable-pip-version-check -r requirements.txt
+    install_if_changed "tg-bot" requirements.txt -- \
+        $PIP install --quiet --disable-pip-version-check -r requirements.txt
 
     TG_BOT_TOKEN="$TG_BOT_TOKEN" \
     BOT_API_URL="http://localhost:8000" \
@@ -64,7 +96,7 @@ restart_watcher() {
     fi
 
     log "Рестарт drive-watcher..."
-    pkill -f 'python drive_watcher.py' 2>/dev/null || true
+    pkill -f '^/venv/main/bin/python drive_watcher\.py$' 2>/dev/null || true
     sleep 1
 
     cd "$APP_DIR/tg-bot"
@@ -90,7 +122,8 @@ restart_bot() {
     sleep 1
 
     cd "$APP_DIR/bot-service"
-    $PIP install --quiet --disable-pip-version-check -r requirements.txt
+    install_if_changed "bot-service" requirements.txt -- \
+        $PIP install --quiet --disable-pip-version-check -r requirements.txt
 
     TRANSCRIBER_URL="http://localhost:8001" \
     DATABASE_URL="sqlite+aiosqlite:////workspace/transcriber.db" \
@@ -123,11 +156,15 @@ restart_transcriber() {
     sleep 1
 
     cd "$APP_DIR/transcriber-service"
-    $PIP install --quiet --disable-pip-version-check \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-    $PIP install --quiet --disable-pip-version-check \
-        "whisperx @ git+https://github.com/m-bain/whisperX.git"
-    $PIP install --quiet --disable-pip-version-check -r requirements.txt
+    install_if_changed "transcriber-service" requirements.txt "$APP_DIR/remote/restart_service.sh" -- \
+        bash -c '
+            set -e
+            '"$PIP"' install --quiet --disable-pip-version-check \
+                torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+            '"$PIP"' install --quiet --disable-pip-version-check \
+                "whisperx @ git+https://github.com/m-bain/whisperX.git@v3.8.5"
+            '"$PIP"' install --quiet --disable-pip-version-check -r requirements.txt
+        '
 
     HF_TOKEN="${HF_TOKEN:-}" \
     ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
@@ -153,17 +190,45 @@ restart_transcriber() {
     log "transcriber-service PID: $!"
 }
 
+check_bot_health() {
+    curl -sf -H "X-API-Key: ${TELEMOST_SERVICE_API_KEY:-}" \
+        http://localhost:8000/health >/dev/null 2>&1
+}
+
+check_transcriber_health() {
+    curl -sf http://localhost:8001/health >/dev/null 2>&1
+}
+
+wait_for_transcriber() {
+    local max_wait="${1:-180}"
+    local elapsed=0
+    local interval=15
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        if check_transcriber_health; then
+            return 0
+        fi
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+    return 1
+}
+
 health_check() {
     log "Health check..."
     if [ -n "${TELEMOST_SERVICE_API_KEY:-}" ]; then
-        curl -s -H "X-API-Key: ${TELEMOST_SERVICE_API_KEY}" \
-            http://localhost:8000/health 2>/dev/null && echo '' \
-            || warn "bot-service: не отвечает"
+        if check_bot_health; then
+            log "bot-service: ok"
+        else
+            warn "bot-service: не отвечает"
+        fi
     else
         warn "bot-service: TELEMOST_SERVICE_API_KEY is not set"
     fi
-    curl -s http://localhost:8001/health 2>/dev/null && echo '' \
-        || warn "transcriber: не отвечает"
+    if check_transcriber_health; then
+        log "transcriber: ok"
+    else
+        warn "transcriber: не отвечает (может всё ещё грузить модели)"
+    fi
 }
 
 # --- Диспетчер ---
@@ -176,7 +241,8 @@ case "$TARGET" in
         restart_tg
         restart_watcher
         restart_bot
-        warn "transcriber НЕ перезапущен (модель грузится ~2 мин). Для рестарта: bash restart_service.sh transcriber"
+        warn "transcriber перезапускается — модель грузится ~2 мин, health временно красный"
+        restart_transcriber
         ;;
     health)
         health_check
@@ -190,5 +256,13 @@ case "$TARGET" in
 esac
 
 sleep 2
+if [ "$TARGET" = "transcriber" ] || [ "$TARGET" = "all" ]; then
+    log "Жду прогрева transcriber (до 3 минут)..."
+    if wait_for_transcriber 180; then
+        log "transcriber прогрет"
+    else
+        warn "transcriber не поднялся за 3 минуты — проверь /workspace/logs/transcriber.log"
+    fi
+fi
 health_check
 log "Готово!"
