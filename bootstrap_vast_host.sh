@@ -9,6 +9,7 @@
 # - ставит Python-зависимости bot/transcriber/tg-bot
 # - ставит Google Chrome и Playwright Chromium
 # - готовит директории /workspace/{logs,recordings,voice_bank}
+# - настраивает hourly-ротацию логов через cron
 #
 # Что НЕ делает:
 # - не прописывает секреты автоматически
@@ -39,10 +40,11 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "=== [1/6] Системные пакеты ==="
+echo "=== [1/7] Системные пакеты ==="
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     ca-certificates \
+    cron \
     dos2unix \
     ffmpeg \
     fonts-liberation \
@@ -65,11 +67,12 @@ apt-get install -y -qq --no-install-recommends \
     libxkbcommon-x11-0 \
     libxrandr2 \
     libxss1 \
+    logrotate \
     pulseaudio \
     wget \
     xvfb
 
-echo "=== [2/6] Google Chrome ==="
+echo "=== [2/7] Google Chrome ==="
 if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1; then
     wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | \
         gpg --dearmor -o /usr/share/keyrings/google-linux-signing-key.gpg
@@ -79,7 +82,7 @@ if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stab
     apt-get install -y -qq google-chrome-stable
 fi
 
-echo "=== [3/6] Репозиторий ==="
+echo "=== [3/7] Репозиторий ==="
 mkdir -p "$WORKDIR"
 if [ -d "$APP_DIR/.git" ]; then
     git -C "$APP_DIR" fetch origin main
@@ -89,21 +92,27 @@ else
     git clone "$REPO_URL" "$APP_DIR"
 fi
 
-echo "=== [4/6] Python-зависимости ==="
+echo "=== [4/7] Python-зависимости ==="
 "$PIP_BIN" install --quiet --disable-pip-version-check \
     torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 "$PIP_BIN" install --quiet --disable-pip-version-check \
-    "whisperx @ git+https://github.com/m-bain/whisperX.git"
+    "whisperx @ git+https://github.com/m-bain/whisperX.git@v3.8.5"
 "$PIP_BIN" install --quiet --disable-pip-version-check \
     -r "$APP_DIR/bot-service/requirements.txt" \
     -r "$APP_DIR/transcriber-service/requirements.txt" \
     -r "$APP_DIR/tg-bot/requirements.txt"
 
-echo "=== [5/6] Playwright Chromium ==="
+echo "=== [5/7] Playwright Chromium ==="
 "$PLAYWRIGHT_BIN" install chromium
 
-echo "=== [6/6] Директории ==="
+echo "=== [6/7] Директории ==="
 mkdir -p "$LOG_DIR" "$RECORDINGS_DIR" "$VOICE_BANK_DIR"
+
+echo "=== [7/7] Cron-задача для ротации логов ==="
+chmod +x "$APP_DIR/remote/rotate_logs.sh"
+CRON_LINE="0 * * * * bash $APP_DIR/remote/rotate_logs.sh >> $LOG_DIR/logrotate.log 2>&1"
+(crontab -l 2>/dev/null | grep -v 'rotate_logs\.sh' ; echo "$CRON_LINE") | crontab -
+service cron start 2>/dev/null || /etc/init.d/cron start 2>/dev/null || true
 
 cat <<'EOF'
 
