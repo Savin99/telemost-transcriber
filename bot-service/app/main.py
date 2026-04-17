@@ -70,7 +70,7 @@ def validate_required_env() -> None:
         )
 
 
-TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://transcriber:8001")
+TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://localhost:8001")
 RECORDINGS_DIR = os.getenv("RECORDINGS_DIR", "/app/recordings")
 API_KEY_HEADER = "X-API-Key"
 LEGACY_STATUS_ALIASES = {"joining": "pending"}
