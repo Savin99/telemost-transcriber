@@ -45,6 +45,20 @@ TELEMOST_RE = re.compile(r"https?://telemost(?:\.360)?\.yandex\.ru/j/\d+")
 active: dict[int, dict] = {}
 pending_reviews: dict[int, dict] = {}
 
+# Локи per chat_id — защита от гонки, когда несколько
+# handle_meeting_url одновременно создают /join для одного чата.
+# Без этого три параллельные ссылки в одном чате создают три записи,
+# потому что все три проходят проверку `chat_id in active` до записи.
+_join_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_join_lock(chat_id: int) -> asyncio.Lock:
+    lock = _join_locks.get(chat_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _join_locks[chat_id] = lock
+    return lock
+
 
 def _safe_html(value: object) -> str:
     return html.escape(str(value), quote=False)
@@ -284,31 +298,39 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
     """Подключить бота к встрече."""
     chat_id = msg.chat.id
 
-    if chat_id in active:
-        await msg.answer("Уже идёт запись. Сначала /stop")
-        return
-
-    status_msg = await msg.answer("Подключаюсь к встрече...")
-
-    payload = {"meeting_url": url}
-    if num_speakers is not None:
-        payload["num_speakers"] = num_speakers
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            resp = await client.post(
-                f"{BOT_API}/join",
-                json=payload,
-                headers=_bot_api_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            meeting_id = data["meeting_id"]
-        except Exception as e:
-            await status_msg.edit_text(f"Не удалось подключиться: {_safe_html(e)}")
+    async with _get_join_lock(chat_id):
+        if chat_id in active:
+            if active[chat_id].get("url") == url:
+                return
+            await msg.answer("Уже идёт запись. Сначала /stop")
             return
 
-    active[chat_id] = {"meeting_id": meeting_id, "url": url}
+        # Застолбить место до вызова /join, чтобы параллельные
+        # хендлеры увидели занятость и вернулись.
+        active[chat_id] = {"meeting_id": None, "url": url}
+
+        status_msg = await msg.answer("Подключаюсь к встрече...")
+
+        payload = {"meeting_url": url}
+        if num_speakers is not None:
+            payload["num_speakers"] = num_speakers
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                resp = await client.post(
+                    f"{BOT_API}/join",
+                    json=payload,
+                    headers=_bot_api_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                meeting_id = data["meeting_id"]
+            except Exception as e:
+                active.pop(chat_id, None)
+                await status_msg.edit_text(f"Не удалось подключиться: {_safe_html(e)}")
+                return
+
+        active[chat_id] = {"meeting_id": meeting_id, "url": url}
 
     await status_msg.edit_text(
         "Бот подключается к встрече.\n\n"
