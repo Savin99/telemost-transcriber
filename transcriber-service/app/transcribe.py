@@ -112,6 +112,9 @@ class TranscriberPipeline:
         self._transcript_refiner = None
         self._voice_bank = None
         self.voice_match_threshold = float(os.getenv("VOICE_MATCH_THRESHOLD", "0.40"))
+        self.high_confidence_identify = float(
+            os.getenv("HIGH_CONFIDENCE_IDENTIFY", "0.70")
+        )
         self.auto_merge_threshold = float(os.getenv("AUTO_MERGE_THRESHOLD", "0.80"))
         self.segment_vote_fraction = float(os.getenv("SEGMENT_VOTE_FRACTION", "0.60"))
         self.segment_vote_min_count = int(os.getenv("SEGMENT_VOTE_MIN_COUNT", "3"))
@@ -820,6 +823,8 @@ class TranscriberPipeline:
             cluster_profiles=cluster_profiles,
         )
 
+        self._demote_low_confidence_identifications(mapping)
+
         used_unknown_names = {
             result.name for result in mapping.values() if not result.is_known
         }
@@ -865,6 +870,29 @@ class TranscriberPipeline:
             },
         )
         return cluster_profiles, mapping
+
+    def _demote_low_confidence_identifications(
+        self,
+        mapping: dict[str, IdentificationResult],
+    ) -> None:
+        for speaker_label, result in list(mapping.items()):
+            if not result.is_known:
+                continue
+            if result.confidence >= self.high_confidence_identify:
+                continue
+            logger.info(
+                "Demoting low-confidence identification to review: cluster=%s "
+                "suggested=%s confidence=%.4f (< %.2f)",
+                speaker_label,
+                result.name,
+                result.confidence,
+                self.high_confidence_identify,
+            )
+            mapping[speaker_label] = IdentificationResult(
+                name=result.name,
+                confidence=result.confidence,
+                is_known=False,
+            )
 
     def _upgrade_unknowns_by_segment_voting(
         self,

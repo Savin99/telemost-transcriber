@@ -406,10 +406,19 @@ class VoiceBank:
         if self._assignment_is_known(assignment):
             return embedding_segments
 
+        if isinstance(assignment, dict):
+            assignment_name = assignment.get("name")
+        else:
+            assignment_name = getattr(assignment, "name", None)
+
         selected: list[dict[str, Any]] = []
         for segment, embedding in zip(embedding_segments, segment_embeddings):
             best_name, best_score = self._best_centroid_match(embedding, centroids)
-            if best_name is not None and best_score >= threshold:
+            if (
+                best_name is not None
+                and best_name != assignment_name
+                and best_score >= threshold
+            ):
                 logger.info(
                     "Skipping review sample for %s %.2f-%.2f: already matches %s (%.4f)",
                     speaker_label,
