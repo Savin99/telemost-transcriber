@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01"
 DEFAULT_EXECUTOR_MODEL = "claude-sonnet-4-6"
-DEFAULT_ADVISOR_MODEL = "claude-opus-4-6"
+DEFAULT_ADVISOR_MODEL = "claude-opus-4-7"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -80,6 +80,7 @@ class AnthropicAdvisorTranscriptRefiner:
             logger.warning("Transcript LLM refinement request failed: %s", exc)
             return segments
 
+        self._log_cache_usage(response_payload)
         text = self._extract_response_text(response_payload)
         try:
             change_payload = self._parse_json_object(text)
@@ -156,7 +157,13 @@ class AnthropicAdvisorTranscriptRefiner:
         payload: dict[str, Any] = {
             "model": self.executor_model,
             "max_tokens": self.max_tokens,
-            "system": self._system_prompt(),
+            "system": [
+                {
+                    "type": "text",
+                    "text": self._system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": [
                 {
                     "role": "user",
@@ -168,7 +175,7 @@ class AnthropicAdvisorTranscriptRefiner:
                                     "speaker": segment.speaker,
                                     "start": round(float(segment.start), 3),
                                     "end": round(float(segment.end), 3),
-                                    "text": str(segment.text)[:900],
+                                    "text": str(segment.text),
                                 }
                                 for index, segment in enumerate(segments)
                             ],
@@ -207,6 +214,16 @@ class AnthropicAdvisorTranscriptRefiner:
                 parts.append(str(block.get("text", "")))
         return "\n".join(parts).strip()
 
+    def _log_cache_usage(self, response_payload: dict[str, Any]) -> None:
+        usage = response_payload.get("usage") or {}
+        logger.info(
+            "Transcript LLM usage: input=%s output=%s cache_write=%s cache_read=%s",
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_read_input_tokens"),
+        )
+
     def _parse_json_object(self, text: str) -> dict[str, Any]:
         if not text:
             raise ValueError("empty response")
@@ -224,15 +241,33 @@ class AnthropicAdvisorTranscriptRefiner:
 
     def _system_prompt(self) -> str:
         return (
-            "You are a conservative post-processor for Russian meeting transcripts. "
-            "Your only job is to fix obvious ASR mistakes inside existing segments. "
-            "You may fix punctuation, casing, duplicated filler caused by ASR, and "
-            "obvious person/product names or terms when strongly supported by context. "
-            "Never change timestamps. Never change segment count. Never move text between "
-            "segments. Never invent facts. Keep the same meaning and language. "
-            "Speaker labels are already handled elsewhere; do not change speakers here. "
-            "Prefer no change when uncertain. If a hard global consistency decision is "
-            "needed, consult the advisor. Return only JSON with this schema: "
+            "You are a post-processor for Russian meeting transcripts. "
+            "Your goal is to improve readability while strictly preserving meaning.\n\n"
+            "DO:\n"
+            "- Fix obvious ASR errors: misheard words, homophones, character confusions.\n"
+            "- Correct punctuation, capitalization, quotation marks per Russian norms.\n"
+            "- Fix grammar (case, agreement, word order) when the intended meaning is clear.\n"
+            "- Expand spoken contractions to literary form: 'щас' -> 'сейчас', "
+            "'чё'/'че' -> 'что', 'тыща' -> 'тысяча', 'норм' -> 'нормально', "
+            "'пасиб' -> 'спасибо', 'тока' -> 'только'.\n"
+            "- Remove ASR-induced duplications (repeated words, stutters, partial retries).\n"
+            "- Remove pure filler sounds: 'э-э', 'ммм', 'эээ', 'а-а'.\n"
+            "- Drop 'ну'/'вот'/'как бы'/'типа'/'короче' only when they are clearly "
+            "meaningless filler; keep them when they carry intonation or meaning.\n"
+            "- Apply correct spelling of person/product names when strongly supported "
+            "by context (e.g., repeated mentions with clearer pronunciation elsewhere).\n\n"
+            "DO NOT:\n"
+            "- Change timestamps, segment count, or move text between segments.\n"
+            "- Invent facts, numbers, names, or information not in the source.\n"
+            "- Change meaning, tone, register, or politeness level.\n"
+            "- Translate, paraphrase, or change the language.\n"
+            "- Change speaker labels (handled elsewhere).\n"
+            "- Edit segments whose wording is already correct.\n\n"
+            "Prefer useful improvement over excessive caution. When truly ambiguous "
+            "between fixing and preserving, preserve. If a global consistency decision "
+            "is needed (one name/term spelled across the transcript), consult the "
+            "advisor.\n\n"
+            "Return ONLY JSON with this schema: "
             "{\"changes\":[{\"index\":0,\"text\":\"updated text\","
             "\"confidence\":0.0,\"reason\":\"short reason\"}]}. "
             "Omit unchanged segments."

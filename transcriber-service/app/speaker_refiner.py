@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ADVISOR_BETA_HEADER = "advisor-tool-2026-03-01"
 DEFAULT_EXECUTOR_MODEL = "claude-sonnet-4-6"
-DEFAULT_ADVISOR_MODEL = "claude-opus-4-6"
+DEFAULT_ADVISOR_MODEL = "claude-opus-4-7"
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -164,7 +164,13 @@ class AnthropicAdvisorSpeakerRefiner:
         payload: dict[str, Any] = {
             "model": self.executor_model,
             "max_tokens": self.max_tokens,
-            "system": self._system_prompt(),
+            "system": [
+                {
+                    "type": "text",
+                    "text": self._system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": [
                 {
                     "role": "user",
@@ -177,7 +183,7 @@ class AnthropicAdvisorSpeakerRefiner:
                                     "speaker": segment.speaker,
                                     "start": round(float(segment.start), 3),
                                     "end": round(float(segment.end), 3),
-                                    "text": str(segment.text)[:700],
+                                    "text": str(segment.text),
                                 }
                                 for index, segment in enumerate(segments)
                             ],

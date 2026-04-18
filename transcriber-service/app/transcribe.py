@@ -30,6 +30,17 @@ REVIEW_NAME_PREFIXES = (
     "also ",
 )
 
+_STATIC_ASR_TERMS: tuple[str, ...] = (
+    "Яндекс Телемост", "Telemost", "WhisperX", "pyannote", "Claude",
+    "Opus", "Sonnet", "Anthropic", "Google Drive",
+    "транскрибация", "диаризация", "спикер",
+    "QA", "CI/CD", "Docker", "FastAPI", "Python",
+    "Vast.ai", "GPU", "API",
+    "Валамис", "Harness", "roadmap", "бэклог", "фича",
+    "деплой", "пайплайн",
+)
+_INITIAL_PROMPT_MAX_CHARS = 900
+
 SHORT_REPLY_RE = re.compile(
     r"^(?:да|нет|угу|ага|ок|окей|конечно|верно|точно|ну да)[.!?…]*$",
     re.IGNORECASE,
@@ -200,7 +211,9 @@ class TranscriberPipeline:
                         "Fa": float(os.getenv("CLUSTERING_FA", "0.04")),
                         "Fb": float(os.getenv("CLUSTERING_FB", "0.9")),
                     },
-                    "segmentation": {"min_duration_off": 0.0},
+                    "segmentation": {
+                    "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
+                },
                 }
             else:
                 # Агломеративная кластеризация (3.1)
@@ -210,7 +223,9 @@ class TranscriberPipeline:
                         "min_cluster_size": int(os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")),
                         "threshold": float(os.getenv("CLUSTERING_THRESHOLD", "0.55")),
                     },
-                    "segmentation": {"min_duration_off": 0.0},
+                    "segmentation": {
+                    "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
+                },
                 }
 
             self._diarize_model.model.instantiate(params)
@@ -358,6 +373,9 @@ class TranscriberPipeline:
             transcribe_kwargs: dict[str, Any] = {"batch_size": 16}
             if self.asr_language:
                 transcribe_kwargs["language"] = self.asr_language
+            initial_prompt = self._build_initial_prompt()
+            if initial_prompt:
+                transcribe_kwargs["initial_prompt"] = initial_prompt
             result = self.asr_model.transcribe(audio, **transcribe_kwargs)
             logger.info("ASR produced %d segments", len(result["segments"]))
 
@@ -420,6 +438,27 @@ class TranscriberPipeline:
                 ai_status,
             )
             return TranscribeResult(segments=segments, ai_status=ai_status)
+
+    def _build_initial_prompt(self) -> str:
+        try:
+            speakers = self.voice_bank.list_speakers()
+            names = sorted({str(entry["name"]) for entry in speakers if entry.get("name")})
+        except Exception:
+            logger.warning("Failed to load voice_bank names for initial_prompt", exc_info=True)
+            names = []
+        terms: list[str] = list(names) + list(_STATIC_ASR_TERMS)
+        prompt = ", ".join(terms)
+        if len(prompt) > _INITIAL_PROMPT_MAX_CHARS:
+            truncated = prompt[:_INITIAL_PROMPT_MAX_CHARS]
+            last_comma = truncated.rfind(",")
+            prompt = truncated[:last_comma] if last_comma > 0 else truncated
+        logger.info(
+            "ASR initial_prompt: %d known speakers, %d static terms, %d chars",
+            len(names),
+            len(_STATIC_ASR_TERMS),
+            len(prompt),
+        )
+        return prompt
 
     def _refine_speakers_with_llm(
         self,
