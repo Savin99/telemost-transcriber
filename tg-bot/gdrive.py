@@ -10,7 +10,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 from meeting_metadata import (
     resolve_meeting_metadata,
     sanitize_drive_component,
@@ -267,6 +267,67 @@ def upload_transcript_md(
 
     except Exception as e:
         logger.exception("Failed to upload transcript to Google Drive: %s", e)
+        return None
+
+
+def upload_recording_file(
+    recording_path: str,
+    *,
+    filename: str | None = None,
+    service=None,
+    originals_folder_name: str = "Originals",
+) -> dict[str, str] | None:
+    """Загрузить оригинальный wav-файл записи в подпапку Originals/ на Drive.
+
+    Делается после upload транскрипта — чтобы оригинал не пропал при rebuild
+    Vast-инстанса. Best-effort: ошибка upload не роняет основной workflow.
+    """
+    service = service or _get_drive_service()
+    if not service:
+        logger.warning("Google Drive not authorized, skipping recording upload")
+        return None
+    if not os.path.exists(recording_path):
+        logger.warning("Recording file missing, skipping upload: %s", recording_path)
+        return None
+    try:
+        parent_folder_id = ensure_drive_folder(
+            service,
+            originals_folder_name,
+            GDRIVE_FOLDER_ID,
+        )
+        name = sanitize_drive_component(
+            filename or os.path.basename(recording_path),
+            fallback=os.path.basename(recording_path),
+        )
+        file_metadata = {"name": name, "parents": [parent_folder_id]}
+        media = MediaFileUpload(
+            recording_path,
+            mimetype="audio/wav",
+            resumable=True,
+            chunksize=8 * 1024 * 1024,
+        )
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink",
+        ).execute()
+        link = str(file.get("webViewLink") or "")
+        file_id = str(file.get("id") or "")
+        logger.info(
+            "Recording uploaded to Google Drive: %s (%s/%s, %d bytes)",
+            link,
+            originals_folder_name,
+            name,
+            os.path.getsize(recording_path),
+        )
+        return _build_upload_result(
+            file_id=file_id,
+            folder_id=parent_folder_id,
+            filename=name,
+            web_view_link=link,
+        )
+    except Exception as e:
+        logger.exception("Failed to upload recording to Google Drive: %s", e)
         return None
 
 

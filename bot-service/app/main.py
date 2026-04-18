@@ -245,6 +245,30 @@ async def _upload_transcript_to_drive(
     )
 
 
+def _upload_recording_to_drive_sync(
+    recording_path: str,
+    *,
+    filename: str | None = None,
+) -> dict[str, str] | None:
+    gdrive_module = _load_tg_bot_module("gdrive")
+    return gdrive_module.upload_recording_file(
+        recording_path,
+        filename=filename,
+    )
+
+
+async def _upload_recording_to_drive(
+    recording_path: str,
+    *,
+    filename: str | None = None,
+) -> dict[str, str] | None:
+    return await asyncio.to_thread(
+        _upload_recording_to_drive_sync,
+        recording_path,
+        filename=filename,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.service_api_key = _load_service_api_key()
@@ -341,6 +365,29 @@ async def _bot_workflow(
                 transcript_payload,
                 source_filename=os.path.basename(recording_path),
             )
+
+            if _env_bool("UPLOAD_ORIGINAL_RECORDING", True):
+                wav_name = drive_file["filename"]
+                if wav_name.endswith(".md"):
+                    wav_name = wav_name[:-3] + ".wav"
+                elif not wav_name.endswith(".wav"):
+                    wav_name = f"{wav_name}.wav"
+                try:
+                    recording_upload = await _upload_recording_to_drive(
+                        recording_path,
+                        filename=wav_name,
+                    )
+                    if recording_upload:
+                        logger.info(
+                            "Meeting %s recording backed up to Drive: %s",
+                            meeting_id,
+                            recording_upload.get("web_view_link"),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Meeting %s: original recording upload failed (non-fatal)",
+                        meeting_id,
+                    )
 
             # 7. Сохранение результатов
             for seg in segments:
