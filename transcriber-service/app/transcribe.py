@@ -378,7 +378,16 @@ class TranscriberPipeline:
                 transcribe_kwargs["language"] = self.asr_language
             initial_prompt = self._build_initial_prompt()
             if initial_prompt:
-                transcribe_kwargs["initial_prompt"] = initial_prompt
+                try:
+                    current_options = self.asr_model.options
+                    self.asr_model.options = current_options._replace(
+                        initial_prompt=initial_prompt
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to apply initial_prompt via asr_model.options",
+                        exc_info=True,
+                    )
             result = self.asr_model.transcribe(audio, **transcribe_kwargs)
             logger.info("ASR produced %d segments", len(result["segments"]))
 
