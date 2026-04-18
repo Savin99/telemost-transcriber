@@ -112,6 +112,9 @@ class TranscriberPipeline:
         self._transcript_refiner = None
         self._voice_bank = None
         self.voice_match_threshold = float(os.getenv("VOICE_MATCH_THRESHOLD", "0.40"))
+        self.auto_merge_threshold = float(os.getenv("AUTO_MERGE_THRESHOLD", "0.80"))
+        self.segment_vote_fraction = float(os.getenv("SEGMENT_VOTE_FRACTION", "0.60"))
+        self.segment_vote_min_count = int(os.getenv("SEGMENT_VOTE_MIN_COUNT", "3"))
         self.min_embedding_segment_seconds = float(
             os.getenv("MIN_EMBEDDING_SEGMENT_SEC", "1.0")
         )
@@ -803,6 +806,11 @@ class TranscriberPipeline:
             threshold=self.voice_match_threshold,
         )
 
+        self._upgrade_unknowns_by_segment_voting(
+            mapping=mapping,
+            cluster_profiles=cluster_profiles,
+        )
+
         used_unknown_names = {
             result.name for result in mapping.values() if not result.is_known
         }
@@ -849,6 +857,83 @@ class TranscriberPipeline:
         )
         return cluster_profiles, mapping
 
+    def _upgrade_unknowns_by_segment_voting(
+        self,
+        mapping: dict[str, IdentificationResult],
+        cluster_profiles: dict[str, dict[str, Any]],
+    ) -> None:
+        try:
+            voice_bank_centroids = self.voice_bank.get_all_centroids()
+        except Exception:
+            logger.warning("Voice bank centroids unavailable for voting", exc_info=True)
+            return
+        if not voice_bank_centroids:
+            return
+
+        assigned_names = {r.name for r in mapping.values() if r.is_known}
+        for speaker_label, result in list(mapping.items()):
+            if result.is_known:
+                continue
+            profile = cluster_profiles.get(speaker_label) or {}
+            segment_embeddings = profile.get("segment_embeddings") or []
+            if len(segment_embeddings) < self.segment_vote_min_count:
+                continue
+
+            votes: dict[str, int] = {}
+            vote_scores: dict[str, list[float]] = {}
+            for embedding in segment_embeddings:
+                emb = l2_normalize(np.asarray(embedding, dtype=np.float32))
+                best_name: str | None = None
+                best_score = -1.0
+                for name, centroid in voice_bank_centroids.items():
+                    score = float(np.dot(emb, centroid))
+                    if score > best_score:
+                        best_name = name
+                        best_score = score
+                if best_name is None or best_score < self.voice_match_threshold:
+                    continue
+                votes[best_name] = votes.get(best_name, 0) + 1
+                vote_scores.setdefault(best_name, []).append(best_score)
+
+            if not votes:
+                continue
+
+            top_name, top_count = max(votes.items(), key=lambda item: item[1])
+            fraction = top_count / len(segment_embeddings)
+            if fraction < self.segment_vote_fraction:
+                logger.info(
+                    "Segment voting inconclusive for %s: top=%s %d/%d (%.2f)",
+                    speaker_label,
+                    top_name,
+                    top_count,
+                    len(segment_embeddings),
+                    fraction,
+                )
+                continue
+            if top_name in assigned_names:
+                logger.info(
+                    "Segment voting skipped for %s: %s already taken",
+                    speaker_label,
+                    top_name,
+                )
+                continue
+
+            avg_score = float(np.mean(vote_scores[top_name]))
+            mapping[speaker_label] = IdentificationResult(
+                name=top_name,
+                confidence=avg_score,
+                is_known=True,
+            )
+            assigned_names.add(top_name)
+            logger.info(
+                "Segment voting upgrade: cluster=%s -> %s (%d/%d segments, avg %.4f)",
+                speaker_label,
+                top_name,
+                top_count,
+                len(segment_embeddings),
+                avg_score,
+            )
+
     def _auto_merge_review_clusters(
         self,
         meeting_key: str,
@@ -888,7 +973,7 @@ class TranscriberPipeline:
                 candidate_label,
                 score,
             )
-            if score < self.voice_match_threshold:
+            if score < self.auto_merge_threshold:
                 continue
 
             previous_name = (
