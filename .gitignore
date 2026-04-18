@@ -6,6 +6,7 @@
 !postgres/init.sql
 .env
 .env.deploy
+CLAUDE.md
 __pycache__/
 *.pyc
 recordings/
