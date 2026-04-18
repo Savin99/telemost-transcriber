@@ -20,6 +20,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message
+from aiohttp import web
 
 from gdrive import upload_transcript_md
 
@@ -85,6 +86,16 @@ async def cmd_start(msg: Message):
         "После транскрипта могу прислать примеры аудио для неизвестных голосов, "
         "и ты просто ответишь именем.\n\n"
         "Работаю и в группах — просто добавь меня и кидайте ссылки."
+    )
+
+
+@dp.message(Command("mychatid"))
+async def cmd_mychatid(msg: Message):
+    """Возвращает chat_id — для настройки TELEMOST_ADMIN_CHAT_ID в .bashrc."""
+    await msg.answer(
+        f"Твой chat_id: <code>{msg.chat.id}</code>\n\n"
+        f"Пропиши в <code>/workspace/.bashrc</code>:\n"
+        f"<code>export TELEMOST_ADMIN_CHAT_ID={msg.chat.id}</code>"
     )
 
 
@@ -629,9 +640,57 @@ async def _send_transcript(chat_id: int, transcript: dict):
     await _maybe_start_speaker_review(chat_id, transcript)
 
 
+async def _handle_trigger_review(request: web.Request) -> web.Response:
+    """Internal HTTP hook — drive_watcher вызывает после обработки файла,
+    чтобы бот автоматически инициировал review голосов в Telegram."""
+    try:
+        payload = await request.json()
+        meeting_id = str(payload["meeting_id"])
+        chat_id = int(payload["chat_id"])
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+    filename = str(payload.get("filename") or "")
+    if filename:
+        with suppress_exc():
+            await bot.send_message(
+                chat_id,
+                f"Новая встреча обработана: <b>{_safe_html(filename)}</b>.\n"
+                f"Начинаю разметку голосов...",
+            )
+    asyncio.create_task(_start_speaker_review(chat_id, meeting_id))
+    logger.info(
+        "Auto-review triggered: meeting=%s chat=%s filename=%s",
+        meeting_id, chat_id, filename,
+    )
+    return web.json_response({"ok": True})
+
+
+def suppress_exc():
+    from contextlib import suppress
+    return suppress(Exception)
+
+
+async def _start_internal_http_server() -> web.AppRunner:
+    app = web.Application()
+    app.router.add_post("/internal/trigger_review", _handle_trigger_review)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    host = os.getenv("INTERNAL_HTTP_HOST", "127.0.0.1")
+    port = int(os.getenv("INTERNAL_HTTP_PORT", "8100"))
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    logger.info("tg-bot internal HTTP server listening on %s:%d", host, port)
+    return runner
+
+
 async def main():
     logger.info("Starting Telegram bot...")
-    await dp.start_polling(bot)
+    runner = await _start_internal_http_server()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":

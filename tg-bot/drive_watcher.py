@@ -209,11 +209,97 @@ def process_file(service, file_info: dict):
         mark_as_processed(service, file_id)
         logger.info("Done: %s", filename)
 
+        # 6. Auto-trigger review в Telegram (если есть unknowns + admin chat задан)
+        _maybe_trigger_auto_review(
+            file_id=file_id,
+            filename=filename,
+            archived_path=archived_path,
+            segments=segments,
+        )
+
     except Exception as e:
         logger.exception("Failed to process %s: %s", filename, e)
     finally:
         # Очистить рабочую директорию
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _maybe_trigger_auto_review(
+    file_id: str,
+    filename: str,
+    archived_path: Path,
+    segments: list[dict],
+) -> None:
+    admin_chat_id = os.getenv("TELEMOST_ADMIN_CHAT_ID")
+    if not admin_chat_id:
+        logger.info("TELEMOST_ADMIN_CHAT_ID not set, skipping auto-review trigger")
+        return
+    has_unknowns = any(
+        str(seg.get("speaker") or "").startswith("Unknown")
+        for seg in segments
+    )
+    if not has_unknowns:
+        logger.info("No unknown speakers in %s, auto-review not needed", filename)
+        return
+
+    meeting_id = f"drive-{file_id}"[:60]
+    db_path = os.getenv(
+        "BOT_SERVICE_DB",
+        "/workspace/telemost-transcriber/bot-service/transcriber.db",
+    )
+    try:
+        import sqlite3
+        from datetime import timezone as _tz
+        conn = sqlite3.connect(db_path)
+        now = datetime.now(_tz.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO meetings "
+            "(id, meeting_url, bot_name, status, recording_path, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                meeting_id,
+                f"drive-watcher-{file_id}",
+                "Транскрибатор",
+                "done",
+                str(archived_path),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.exception(
+            "Failed to INSERT meeting row for auto-review: %s", meeting_id,
+        )
+        return
+
+    tg_bot_url = os.getenv("TG_BOT_INTERNAL_URL", "http://127.0.0.1:8100")
+    try:
+        import json as _json
+        import urllib.request as _urllib
+        body = _json.dumps(
+            {
+                "meeting_id": meeting_id,
+                "chat_id": int(admin_chat_id),
+                "filename": filename,
+            }
+        ).encode("utf-8")
+        req = _urllib.Request(
+            f"{tg_bot_url}/internal/trigger_review",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib.urlopen(req, timeout=15) as resp:
+            logger.info(
+                "Auto-review triggered: meeting=%s status=%s",
+                meeting_id, resp.status,
+            )
+    except Exception:
+        logger.exception(
+            "Failed to trigger auto-review for meeting=%s", meeting_id,
+        )
 
 
 def main():
