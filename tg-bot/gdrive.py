@@ -270,6 +270,68 @@ def upload_transcript_md(
         return None
 
 
+def update_transcript_md(
+    file_id: str,
+    transcript: dict,
+    *,
+    source_filename: str | None = None,
+    service=None,
+) -> dict[str, str] | None:
+    """Перезаписать содержимое ранее загруженного .md на Google Drive.
+
+    В отличие от upload_transcript_md, не создаёт новый файл и не меняет
+    parent/имя — обновляет только содержимое (через files().update).
+    Вызывается после review голосов, когда в transcript уже подставлены
+    правильные имена.
+    """
+    service = service or _get_drive_service()
+    if not service:
+        logger.warning("Google Drive not authorized, skipping update")
+        return None
+    if not file_id:
+        logger.warning("update_transcript_md called without file_id")
+        return None
+
+    try:
+        metadata = resolve_meeting_metadata(
+            transcript=transcript,
+            source_filename=source_filename,
+        )
+        enriched_transcript = dict(transcript)
+        enriched_transcript["title"] = metadata.title
+
+        media = MediaIoBaseUpload(
+            io.BytesIO(format_transcript_md(enriched_transcript).encode("utf-8")),
+            mimetype="text/markdown",
+            resumable=False,
+        )
+
+        file = service.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields="id, name, parents, webViewLink",
+        ).execute()
+
+        parents = file.get("parents") or []
+        link = str(file.get("webViewLink") or "")
+        result = _build_upload_result(
+            file_id=str(file.get("id") or file_id),
+            folder_id=str(parents[0]) if parents else "",
+            filename=str(file.get("name") or ""),
+            web_view_link=link,
+        )
+        logger.info(
+            "Transcript updated on Google Drive: %s (file_id=%s)",
+            link,
+            file_id,
+        )
+        return result
+
+    except Exception as e:
+        logger.exception("Failed to update transcript on Google Drive: %s", e)
+        return None
+
+
 def upload_recording_file(
     recording_path: str,
     *,

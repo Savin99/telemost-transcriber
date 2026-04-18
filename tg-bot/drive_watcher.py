@@ -215,6 +215,8 @@ def process_file(service, file_info: dict):
             filename=filename,
             archived_path=archived_path,
             segments=segments,
+            duration_seconds=transcript.get("duration_seconds"),
+            drive_file=drive_file,
         )
 
     except Exception as e:
@@ -229,6 +231,8 @@ def _maybe_trigger_auto_review(
     filename: str,
     archived_path: Path,
     segments: list[dict],
+    duration_seconds: float | int | None = None,
+    drive_file: dict | None = None,
 ) -> None:
     admin_chat_id = os.getenv("TELEMOST_ADMIN_CHAT_ID")
     if not admin_chat_id:
@@ -247,6 +251,11 @@ def _maybe_trigger_auto_review(
         "BOT_SERVICE_DB",
         "/workspace/telemost-transcriber/bot-service/transcriber.db",
     )
+    drive_file = drive_file or {}
+    drive_file_id = str(drive_file.get("file_id") or "") or None
+    drive_folder_id = str(drive_file.get("folder_id") or "") or None
+    drive_filename = str(drive_file.get("filename") or "") or None
+    drive_web_view_link = str(drive_file.get("web_view_link") or "") or None
     try:
         import sqlite3
         from datetime import timezone as _tz
@@ -254,17 +263,49 @@ def _maybe_trigger_auto_review(
         now = datetime.now(_tz.utc).isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO meetings "
-            "(id, meeting_url, bot_name, status, recording_path, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(id, meeting_url, bot_name, status, recording_path, "
+            " duration_seconds, transcript_url, "
+            " drive_file_id, drive_folder_id, drive_filename, drive_web_view_link, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 meeting_id,
                 f"drive-watcher-{file_id}",
                 "Транскрибатор",
                 "done",
                 str(archived_path),
+                int(duration_seconds) if duration_seconds else None,
+                drive_web_view_link,
+                drive_file_id,
+                drive_folder_id,
+                drive_filename,
+                drive_web_view_link,
                 now,
                 now,
             ),
+        )
+        # Сохранить сегменты — чтобы bot.py мог после review дернуть
+        # GET /transcripts/{id} и получить транскрипт с актуальными именами.
+        conn.execute(
+            "DELETE FROM transcript_segments WHERE meeting_id = ?",
+            (meeting_id,),
+        )
+        import uuid as _uuid
+        conn.executemany(
+            "INSERT INTO transcript_segments "
+            "(id, meeting_id, speaker, start_time, end_time, text) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    _uuid.uuid4().hex,
+                    meeting_id,
+                    str(seg.get("speaker") or "Unknown"),
+                    float(seg.get("start") or 0),
+                    float(seg.get("end") or 0),
+                    str(seg.get("text") or ""),
+                )
+                for seg in segments
+            ],
         )
         conn.commit()
         conn.close()

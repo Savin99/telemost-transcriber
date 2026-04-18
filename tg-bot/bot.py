@@ -22,7 +22,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, Message
 from aiohttp import web
 
-from gdrive import upload_transcript_md
+from gdrive import update_transcript_md, upload_transcript_md
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -530,8 +530,11 @@ async def _send_next_review_item(chat_id: int):
     if state.get("current") is None:
         queue = state.get("queue", [])
         if not queue:
+            meeting_id = state.get("meeting_id")
             pending_reviews.pop(chat_id, None)
             await bot.send_message(chat_id, "Разметка новых голосов завершена.")
+            if meeting_id:
+                asyncio.create_task(_finalize_meeting_md(chat_id, str(meeting_id)))
             return
         state["current"] = queue.pop(0)
 
@@ -638,6 +641,88 @@ async def _send_transcript(chat_id: int, transcript: dict):
         )
 
     await _maybe_start_speaker_review(chat_id, transcript)
+
+
+async def _finalize_meeting_md(chat_id: int, meeting_id: str) -> None:
+    """После завершения review — перезаписать .md в Drive с актуальными именами."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            meeting_resp = await client.get(
+                f"{BOT_API}/status/{meeting_id}",
+                headers=_bot_api_headers(),
+            )
+            meeting_resp.raise_for_status()
+            meeting_data = meeting_resp.json()
+        except Exception as e:
+            logger.warning("finalize_md: could not fetch meeting %s: %s", meeting_id, e)
+            return
+
+        drive = meeting_data.get("drive_file") or {}
+        drive_file_id = str(drive.get("file_id") or "")
+        if not drive_file_id:
+            logger.info(
+                "finalize_md: meeting=%s has no drive_file_id, skipping update",
+                meeting_id,
+            )
+            await bot.send_message(
+                chat_id,
+                "Имена сохранил, но ссылки на .md в Drive нет — обновлять нечего.",
+            )
+            return
+
+        try:
+            transcript_resp = await client.get(
+                f"{BOT_API}/transcripts/{meeting_id}",
+                headers=_bot_api_headers(),
+            )
+            transcript_resp.raise_for_status()
+            transcript = transcript_resp.json()
+        except Exception as e:
+            logger.warning(
+                "finalize_md: could not fetch transcript for %s: %s", meeting_id, e
+            )
+            await bot.send_message(
+                chat_id,
+                f"Имена сохранил, но не смог получить свежий транскрипт: {_safe_html(e)}",
+            )
+            return
+
+    source_filename = drive.get("filename") or None
+    try:
+        result = await asyncio.to_thread(
+            update_transcript_md,
+            drive_file_id,
+            transcript,
+            source_filename=source_filename,
+        )
+    except Exception as e:
+        logger.exception("finalize_md: update_transcript_md failed: %s", e)
+        await bot.send_message(
+            chat_id,
+            f"Имена сохранил, но не удалось обновить .md в Drive: {_safe_html(e)}",
+        )
+        return
+
+    if not result:
+        await bot.send_message(
+            chat_id,
+            "Имена сохранил, но обновить .md в Drive не получилось "
+            "(см. логи бота).",
+        )
+        return
+
+    link = result.get("web_view_link") or drive.get("web_view_link") or ""
+    if link:
+        safe_link = html.escape(link, quote=True)
+        await bot.send_message(
+            chat_id,
+            f'✅ Транскрипт обновлён с правильными именами: '
+            f'<a href="{safe_link}">открыть в Drive</a>',
+        )
+    else:
+        await bot.send_message(
+            chat_id, "✅ Транскрипт в Drive обновлён с правильными именами."
+        )
 
 
 async def _handle_trigger_review(request: web.Request) -> web.Response:
