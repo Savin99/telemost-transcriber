@@ -978,20 +978,30 @@ class TranscriberPipeline:
 
             segment_embeddings = profile.get("segment_embeddings") or []
             if len(segment_embeddings) >= self.segment_vote_min_count:
-                matches = 0
+                all_centroids = self.voice_bank.get_all_centroids()
+                best_for_target = 0
                 for emb in segment_embeddings:
                     emb_n = l2_normalize(np.asarray(emb, dtype=np.float32))
-                    seg_score = float(np.dot(emb_n, target_centroid))
-                    if seg_score >= self.voice_match_threshold:
-                        matches += 1
-                fraction = matches / len(segment_embeddings)
+                    best_name = None
+                    best_score = -1.0
+                    for name, cent in all_centroids.items():
+                        s = float(np.dot(emb_n, cent))
+                        if s > best_score:
+                            best_name = name
+                            best_score = s
+                    if (
+                        best_name == labeled_name
+                        and best_score >= self.voice_match_threshold
+                    ):
+                        best_for_target += 1
+                fraction = best_for_target / len(segment_embeddings)
                 if fraction < self.segment_vote_fraction:
                     logger.info(
                         "Review merge vetoed by segment voting: cluster=%s target=%s "
-                        "only %d/%d (%.2f) segments match",
+                        "only %d/%d (%.2f) segments best-match target",
                         candidate_label,
                         labeled_name,
-                        matches,
+                        best_for_target,
                         len(segment_embeddings),
                         fraction,
                     )
