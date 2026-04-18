@@ -3,6 +3,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -250,6 +251,20 @@ class VoiceBank:
 
         centroid = l2_normalize(np.mean(np.vstack(embeddings), axis=0))
         existing_names = {speaker["name"] for speaker in self.list_speakers()}
+
+        canonical_name = self._resolve_duplicate_name(
+            candidate_name=name,
+            candidate_centroid=centroid,
+            existing_names=existing_names,
+        )
+        if canonical_name != name:
+            logger.info(
+                "Fuzzy-dedup: '%s' merged into existing speaker '%s'",
+                name,
+                canonical_name,
+            )
+            name = canonical_name
+
         if name in existing_names:
             self.update(name, centroid, alpha=alpha)
             logger.info(
@@ -267,6 +282,53 @@ class VoiceBank:
             speaker_label,
         )
         return IdentificationResult(name=name, confidence=1.0, is_known=True)
+
+    def _resolve_duplicate_name(
+        self,
+        candidate_name: str,
+        candidate_centroid: np.ndarray,
+        existing_names: set[str],
+    ) -> str:
+        if candidate_name in existing_names:
+            return candidate_name
+
+        name_threshold = float(os.getenv("NAME_DUP_THRESHOLD", "0.75"))
+        voice_threshold = float(os.getenv("VOICE_DUP_THRESHOLD", "0.80"))
+
+        candidate_lower = candidate_name.casefold().strip()
+        all_centroids = self.get_all_centroids()
+
+        best_name: str | None = None
+        best_score = 0.0
+        for existing_name in existing_names:
+            name_sim = SequenceMatcher(
+                None,
+                candidate_lower,
+                existing_name.casefold().strip(),
+            ).ratio()
+            if name_sim < name_threshold:
+                continue
+            existing_centroid = all_centroids.get(existing_name)
+            if existing_centroid is None:
+                continue
+            voice_sim = float(
+                np.dot(l2_normalize(candidate_centroid), existing_centroid)
+            )
+            if voice_sim < voice_threshold:
+                continue
+            combined = name_sim + voice_sim
+            logger.info(
+                "Fuzzy-dedup candidate: %r vs existing %r name_sim=%.3f voice_sim=%.3f",
+                candidate_name,
+                existing_name,
+                name_sim,
+                voice_sim,
+            )
+            if combined > best_score:
+                best_score = combined
+                best_name = existing_name
+
+        return best_name or candidate_name
 
     def select_review_segments(self, bundle: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         centroids = self.get_all_centroids()
