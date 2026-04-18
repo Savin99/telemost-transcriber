@@ -976,6 +976,27 @@ class TranscriberPipeline:
             if score < self.auto_merge_threshold:
                 continue
 
+            segment_embeddings = profile.get("segment_embeddings") or []
+            if len(segment_embeddings) >= self.segment_vote_min_count:
+                matches = 0
+                for emb in segment_embeddings:
+                    emb_n = l2_normalize(np.asarray(emb, dtype=np.float32))
+                    seg_score = float(np.dot(emb_n, target_centroid))
+                    if seg_score >= self.voice_match_threshold:
+                        matches += 1
+                fraction = matches / len(segment_embeddings)
+                if fraction < self.segment_vote_fraction:
+                    logger.info(
+                        "Review merge vetoed by segment voting: cluster=%s target=%s "
+                        "only %d/%d (%.2f) segments match",
+                        candidate_label,
+                        labeled_name,
+                        matches,
+                        len(segment_embeddings),
+                        fraction,
+                    )
+                    continue
+
             previous_name = (
                 current_assignment.name if current_assignment else candidate_label
             )
