@@ -262,13 +262,17 @@ async def _show_meetings_list(chat_id: int, mode: str = "list", limit: int = 10)
 
         drive = meeting.get("drive_file") or {}
         drive_link = drive.get("web_view_link")
-        filename = drive.get("filename") or meeting_id
-        title = filename if len(filename) <= 40 else filename[:37] + "..."
+        filename = drive.get("filename")
+        title = _human_title(filename)
 
-        lines.append(
-            f"{idx + 1}. <b>{_safe_html(title)}</b>\n"
-            f"   <code>{_safe_html(meeting_id)}</code>  {_safe_html(created_at)}  {duration_text}"
+        header_line = (
+            f"<b>{idx + 1}.</b> 📅 {_safe_html(created_at)} · ⏱ {duration_text}"
         )
+        if title:
+            safe_title = title if len(title) <= 60 else title[:57] + "..."
+            lines.append(f"{header_line}\n   {_safe_html(safe_title)}")
+        else:
+            lines.append(header_line)
 
         row: list[InlineKeyboardButton] = [
             InlineKeyboardButton(
@@ -612,6 +616,30 @@ def _format_created_at(value: str | None) -> str:
     except ValueError:
         return value
     return dt.strftime("%d.%m %H:%M")
+
+
+_HASH_TITLE_RE = re.compile(
+    r"^(drive-[A-Za-z0-9_-]{10,}|audio-[0-9a-f]{8,}|[0-9a-f]{8}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9]{1,3}-[0-9a-f]{12,}|"
+    r"[0-9a-f]{16,})$"
+)
+
+
+def _human_title(filename: str | None) -> str | None:
+    """Вернуть человеко-читаемый заголовок встречи или None, если имя — хэш.
+
+    Отбрасывает расширение файла и считает имя осмысленным, если оно НЕ похоже
+    на drive-ID, UUID или hex-хэш (в таких случаях показывать его бессмысленно —
+    пользователь всё равно ничего не поймёт, лучше обойтись без заголовка).
+    """
+    if not filename:
+        return None
+    stem = filename.rsplit(".", 1)[0].strip()
+    if not stem:
+        return None
+    if _HASH_TITLE_RE.match(stem):
+        return None
+    return stem
 
 
 def _format_segment_preview(segments: list[dict]) -> str:
