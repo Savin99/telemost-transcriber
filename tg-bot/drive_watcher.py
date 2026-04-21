@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 TRANSCRIBER_URL = os.getenv("TRANSCRIBER_URL", "http://localhost:8001")
 POLL_INTERVAL = int(os.getenv("DRIVE_POLL_INTERVAL", "30"))
 WORK_DIR = Path(os.getenv("DRIVE_WORK_DIR", "/tmp/drive_watcher"))
-ARCHIVE_DIR = Path(os.getenv("DRIVE_ARCHIVE_DIR", "/workspace/recordings/drive_imports"))
+ARCHIVE_DIR = Path(
+    os.getenv("DRIVE_ARCHIVE_DIR", "/workspace/recordings/drive_imports")
+)
 AUDIO_MIMES = {
     "audio/mpeg",
     "audio/mp3",
@@ -109,7 +111,10 @@ def archive_file(source_path: Path, file_id: str, filename: str) -> Path:
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive_path = archive_dir / filename
 
-    if archive_path.exists() and archive_path.stat().st_size == source_path.stat().st_size:
+    if (
+        archive_path.exists()
+        and archive_path.stat().st_size == source_path.stat().st_size
+    ):
         logger.info("Archive already exists: %s", archive_path)
         return archive_path
 
@@ -123,7 +128,9 @@ def transcribe_audio(audio_path: Path, num_speakers: int | None = None) -> dict:
     payload = {"audio_path": str(audio_path)}
     if num_speakers is not None:
         payload["num_speakers"] = num_speakers
-    with httpx.Client(timeout=600) as client:
+    with httpx.Client(
+        timeout=float(os.getenv("TRANSCRIBER_TIMEOUT", "1800"))
+    ) as client:
         response = client.post(
             f"{TRANSCRIBER_URL}/transcribe",
             json=payload,
@@ -149,8 +156,9 @@ def parse_num_speakers(filename: str) -> int | None:
         'встреча.webm' → None
     """
     import re
+
     stem = Path(filename).stem
-    match = re.search(r'[\s_\-](\d+)$', stem)
+    match = re.search(r"[\s_\-](\d+)$", stem)
     if match:
         n = int(match.group(1))
         if 1 <= n <= 20:
@@ -182,7 +190,9 @@ def process_file(service, file_info: dict):
             mark_as_processed(service, file_id)
             return
 
-        logger.info("Got %d segments for %s (ai_status=%s)", len(segments), filename, ai_status)
+        logger.info(
+            "Got %d segments for %s (ai_status=%s)", len(segments), filename, ai_status
+        )
 
         # 3. Сформировать MD
         transcript = {
@@ -239,8 +249,7 @@ def _maybe_trigger_auto_review(
         logger.info("TELEMOST_ADMIN_CHAT_ID not set, skipping auto-review trigger")
         return
     has_unknowns = any(
-        str(seg.get("speaker") or "").startswith("Unknown")
-        for seg in segments
+        str(seg.get("speaker") or "").startswith("Unknown") for seg in segments
     )
     if not has_unknowns:
         logger.info("No unknown speakers in %s, auto-review not needed", filename)
@@ -259,6 +268,7 @@ def _maybe_trigger_auto_review(
     try:
         import sqlite3
         from datetime import timezone as _tz
+
         conn = sqlite3.connect(db_path)
         now = datetime.now(_tz.utc).isoformat()
         conn.execute(
@@ -291,6 +301,7 @@ def _maybe_trigger_auto_review(
             (meeting_id,),
         )
         import uuid as _uuid
+
         conn.executemany(
             "INSERT INTO transcript_segments "
             "(id, meeting_id, speaker, start_time, end_time, text) "
@@ -311,7 +322,8 @@ def _maybe_trigger_auto_review(
         conn.close()
     except Exception:
         logger.exception(
-            "Failed to INSERT meeting row for auto-review: %s", meeting_id,
+            "Failed to INSERT meeting row for auto-review: %s",
+            meeting_id,
         )
         return
 
@@ -319,6 +331,7 @@ def _maybe_trigger_auto_review(
     try:
         import json as _json
         import urllib.request as _urllib
+
         body = _json.dumps(
             {
                 "meeting_id": meeting_id,
@@ -335,11 +348,13 @@ def _maybe_trigger_auto_review(
         with _urllib.urlopen(req, timeout=15) as resp:
             logger.info(
                 "Auto-review triggered: meeting=%s status=%s",
-                meeting_id, resp.status,
+                meeting_id,
+                resp.status,
             )
     except Exception:
         logger.exception(
-            "Failed to trigger auto-review for meeting=%s", meeting_id,
+            "Failed to trigger auto-review for meeting=%s",
+            meeting_id,
         )
 
 

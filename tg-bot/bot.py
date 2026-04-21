@@ -18,8 +18,17 @@ import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from aiohttp import web
 
 from gdrive import update_transcript_md, upload_transcript_md
@@ -42,9 +51,37 @@ dp = Dispatcher()
 # Regex для ссылок Телемоста
 TELEMOST_RE = re.compile(r"https?://telemost(?:\.360)?\.yandex\.ru/j/\d+")
 
-# Активные сессии: chat_id → {"meeting_id": str, "url": str}
+# Активные сессии: chat_id → {"meeting_id": str, "url": str, "status_message_id": int | None}
 active: dict[int, dict] = {}
 pending_reviews: dict[int, dict] = {}
+
+# --- UI: reply-клавиатура главного меню ---
+MENU_STATUS = "📊 Статус"
+MENU_STOP = "⏹ Остановить"
+MENU_VOICES = "🎙 Голоса"
+MENU_MEETINGS = "📋 Встречи"
+MENU_HELP = "ℹ️ Справка"
+
+MAIN_MENU = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text=MENU_STATUS), KeyboardButton(text=MENU_STOP)],
+        [KeyboardButton(text=MENU_VOICES), KeyboardButton(text=MENU_MEETINGS)],
+        [KeyboardButton(text=MENU_HELP)],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+# --- Callback data префиксы ---
+CB_REVIEW_SKIP = "rv:skip"
+CB_REVIEW_UNKNOWN = "rv:unk"
+CB_REVIEW_STOP = "rv:stop"
+CB_MEETING_VOICES = "mt:voices:"  # + meeting_id
+CB_MEETING_DRIVE = "mt:drive:"  # + short_id (см. _meetings_cache)
+
+# Кэш коротких id → meeting_id для /meetings callback'ов
+# (Telegram ограничивает callback_data 64 байтами, meeting_id бывает длинным)
+_meetings_cache: dict[int, dict[str, str]] = {}
 
 # Локи per chat_id — защита от гонки, когда несколько
 # handle_meeting_url одновременно создают /join для одного чата.
@@ -71,22 +108,25 @@ def _bot_api_headers() -> dict[str, str]:
     return {"X-API-Key": BOT_API_KEY}
 
 
+HELP_TEXT = (
+    "Я транскрибирую встречи Яндекс Телемоста.\n\n"
+    "<b>Как использовать:</b>\n"
+    "1. Кинь ссылку на Телемост — я подключусь автоматически\n"
+    "2. Или: <code>/rec https://telemost.yandex.ru/j/...</code>\n\n"
+    "<b>Меню снизу:</b>\n"
+    f"{MENU_STATUS} — прогресс текущей записи\n"
+    f"{MENU_STOP} — остановить запись\n"
+    f"{MENU_VOICES} — разметка новых голосов\n"
+    f"{MENU_MEETINGS} — последние готовые встречи\n\n"
+    "После транскрипта могу прислать примеры аудио для неизвестных голосов, "
+    "и ты просто ответишь именем (или кнопкой под сообщением).\n\n"
+    "Работаю и в группах — просто добавь меня и кидайте ссылки."
+)
+
+
 @dp.message(Command("start", "help"))
 async def cmd_start(msg: Message):
-    await msg.answer(
-        "Я транскрибирую встречи Яндекс Телемоста.\n\n"
-        "<b>Как использовать:</b>\n"
-        "1. Кинь ссылку на Телемост — я подключусь автоматически\n"
-        "2. Или: <code>/rec https://telemost.yandex.ru/j/...</code>\n\n"
-        "<b>Команды:</b>\n"
-        "/stop — остановить запись и получить транскрипт\n"
-        "/status — статус текущей записи\n"
-        "/voices — показать последние готовые встречи для разметки голосов\n"
-        "/voices MEETING_ID — начать разметку для старой записи\n\n"
-        "После транскрипта могу прислать примеры аудио для неизвестных голосов, "
-        "и ты просто ответишь именем.\n\n"
-        "Работаю и в группах — просто добавь меня и кидайте ссылки."
-    )
+    await msg.answer(HELP_TEXT, reply_markup=MAIN_MENU)
 
 
 @dp.message(Command("mychatid"))
@@ -150,7 +190,7 @@ async def cmd_stop(msg: Message):
 async def cmd_status(msg: Message):
     session = active.get(msg.chat.id)
     if not session:
-        await msg.answer("Нет активной записи.")
+        await msg.answer("Нет активной записи.", reply_markup=MAIN_MENU)
         return
 
     async with httpx.AsyncClient(timeout=10) as client:
@@ -160,59 +200,102 @@ async def cmd_status(msg: Message):
                 headers=_bot_api_headers(),
             )
             data = resp.json()
-            status = data["status"]
-            duration = data.get("duration_seconds")
-            dur_str = ""
-            if duration:
-                m, s = divmod(int(duration), 60)
-                dur_str = f" ({m}:{s:02d})"
-            await msg.answer(f"Статус: <b>{_safe_html(status)}</b>{dur_str}")
         except Exception as e:
             await msg.answer(f"Ошибка: {_safe_html(e)}")
+            return
+
+    await _update_status_message(msg.chat.id, _render_live_status(data["status"], data))
 
 
-@dp.message(Command("voices"))
+@dp.message(Command("voices", "meetings"))
 async def cmd_voices(msg: Message, command: CommandObject):
     meeting_id = (command.args or "").strip()
     if meeting_id:
         await _start_speaker_review(msg.chat.id, meeting_id)
         return
+    await _show_meetings_list(msg.chat.id, mode="list")
 
+
+async def _show_meetings_list(chat_id: int, mode: str = "list", limit: int = 10):
+    """Показать последние готовые встречи с inline-кнопками.
+
+    mode="list" — показ + действия (Голоса / Drive)
+    mode="voices" — тот же список, но акцент на разметку
+    """
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             response = await client.get(
                 f"{BOT_API}/meetings",
-                params={"status": "done", "limit": 5},
+                params={"status": "done", "limit": limit},
                 headers=_bot_api_headers(),
             )
             response.raise_for_status()
             meetings = response.json()
         except Exception as e:
-            await msg.answer(f"Не удалось получить список встреч: {_safe_html(e)}")
+            await bot.send_message(
+                chat_id, f"Не удалось получить список встреч: {_safe_html(e)}"
+            )
             return
 
     if not meetings:
-        await msg.answer("Пока нет готовых встреч для разметки голосов.")
+        await bot.send_message(chat_id, "Пока нет готовых встреч.")
         return
 
-    lines = ["Последние готовые встречи:", ""]
-    for meeting in meetings:
+    cache = _meetings_cache.setdefault(chat_id, {})
+    cache.clear()
+
+    header = (
+        "🎙 Последние встречи — выбери для разметки голосов:"
+        if mode == "voices"
+        else "📋 Последние готовые встречи:"
+    )
+    lines = [header, ""]
+    keyboard_rows: list[list[InlineKeyboardButton]] = []
+
+    for idx, meeting in enumerate(meetings):
+        meeting_id = str(meeting["meeting_id"])
         created_at = _format_created_at(meeting.get("created_at"))
         duration = meeting.get("duration_seconds")
         duration_text = _format_time(float(duration)) if duration else "?"
+        short_id = str(idx)
+        cache[short_id] = meeting_id
+
+        drive = meeting.get("drive_file") or {}
+        drive_link = drive.get("web_view_link")
+        filename = drive.get("filename") or meeting_id
+        title = filename if len(filename) <= 40 else filename[:37] + "..."
+
         lines.append(
-            f"<code>{_safe_html(meeting['meeting_id'])}</code>  "
-            f"{_safe_html(created_at)}  {duration_text}"
+            f"{idx + 1}. <b>{_safe_html(title)}</b>\n"
+            f"   <code>{_safe_html(meeting_id)}</code>  {_safe_html(created_at)}  {duration_text}"
         )
 
-    lines.extend(
-        [
-            "",
-            "Чтобы начать разметку, отправь:",
-            "<code>/voices MEETING_ID</code>",
+        row: list[InlineKeyboardButton] = [
+            InlineKeyboardButton(
+                text="🎙 Голоса",
+                callback_data=f"{CB_MEETING_VOICES}{short_id}",
+            )
         ]
+        if drive_link:
+            row.append(InlineKeyboardButton(text="🔗 Drive", url=drive_link))
+        keyboard_rows.append(row)
+
+    await bot.send_message(
+        chat_id,
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
     )
-    await msg.answer("\n".join(lines))
+
+
+@dp.callback_query(F.data.startswith(CB_MEETING_VOICES))
+async def cb_meeting_voices(cq: CallbackQuery):
+    short_id = cq.data[len(CB_MEETING_VOICES) :]
+    meeting_id = (_meetings_cache.get(cq.message.chat.id) or {}).get(short_id)
+    if not meeting_id:
+        await cq.answer("Список устарел, нажми /meetings заново.", show_alert=True)
+        return
+    await cq.answer("Готовлю разметку...")
+    await _start_speaker_review(cq.message.chat.id, meeting_id)
 
 
 @dp.message(Command("skipvoice"))
@@ -237,12 +320,41 @@ async def cmd_stopvoices(msg: Message):
     await msg.answer("Сейчас нет активной разметки голосов.")
 
 
+MENU_BUTTON_TEXTS = {MENU_STATUS, MENU_STOP, MENU_VOICES, MENU_MEETINGS, MENU_HELP}
+
+
+@dp.message(F.text == MENU_STATUS)
+async def menu_status(msg: Message):
+    await cmd_status(msg)
+
+
+@dp.message(F.text == MENU_STOP)
+async def menu_stop(msg: Message):
+    await cmd_stop(msg)
+
+
+@dp.message(F.text == MENU_VOICES)
+async def menu_voices(msg: Message):
+    await _show_meetings_list(msg.chat.id, mode="voices")
+
+
+@dp.message(F.text == MENU_MEETINGS)
+async def menu_meetings(msg: Message):
+    await _show_meetings_list(msg.chat.id, mode="list")
+
+
+@dp.message(F.text == MENU_HELP)
+async def menu_help(msg: Message):
+    await msg.answer(HELP_TEXT, reply_markup=MAIN_MENU)
+
+
 def _is_pending_voice_label_message(message: Message) -> bool:
     text = (message.text or "").strip()
     return (
         message.chat.id in pending_reviews
         and bool(text)
         and not text.startswith("/")
+        and text not in MENU_BUTTON_TEXTS
         and not TELEMOST_RE.search(text)
     )
 
@@ -341,16 +453,52 @@ async def _join_meeting(msg: Message, url: str, num_speakers: int | None = None)
                 await status_msg.edit_text(f"Не удалось подключиться: {_safe_html(e)}")
                 return
 
-        active[chat_id] = {"meeting_id": meeting_id, "url": url}
+        active[chat_id] = {
+            "meeting_id": meeting_id,
+            "url": url,
+            "status_message_id": getattr(status_msg, "message_id", None),
+            "last_status_text": "",
+        }
 
     await status_msg.edit_text(
-        "Бот подключается к встрече.\n\n"
-        "Когда закончите — отправьте /stop\n"
-        "Или бот завершит автоматически, когда встреча закончится."
+        "🔴 <b>Идёт запись</b>\n\n"
+        "Когда закончите — нажми ⏹ Остановить (или /stop).\n"
+        "Бот завершит сам, когда встреча закончится."
     )
 
     # Фоновое ожидание завершения
     asyncio.create_task(_auto_wait(chat_id, meeting_id))
+
+
+async def _update_status_message(chat_id: int, text: str) -> None:
+    """Обновить pinned status-сообщение сессии (если оно есть).
+
+    Если сообщения нет — отправит новое и запомнит его id.
+    Дедуп: не редактирует если текст не изменился (Telegram вернёт 400).
+    """
+    session = active.get(chat_id)
+    if session is None:
+        await bot.send_message(chat_id, text)
+        return
+
+    if session.get("last_status_text") == text:
+        return
+
+    message_id = session.get("status_message_id")
+    if message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text
+            )
+            session["last_status_text"] = text
+            return
+        except TelegramBadRequest:
+            # сообщение удалили / слишком старое — отправим новое
+            pass
+
+    sent = await bot.send_message(chat_id, text)
+    session["status_message_id"] = sent.message_id
+    session["last_status_text"] = text
 
 
 async def _auto_wait(chat_id: int, meeting_id: str):
@@ -374,6 +522,8 @@ async def _auto_wait(chat_id: int, meeting_id: str):
             except Exception:
                 continue
 
+            await _update_status_message(chat_id, _render_live_status(status, data))
+
             if status == "done":
                 active.pop(chat_id, None)
                 try:
@@ -393,6 +543,28 @@ async def _auto_wait(chat_id: int, meeting_id: str):
                 error_msg = _safe_html(data.get("error_message", "Неизвестная ошибка"))
                 await bot.send_message(chat_id, f"Ошибка записи: {error_msg}")
                 return
+
+
+def _render_live_status(status: str, data: dict) -> str:
+    """Собрать текст статус-сообщения по данным /status/{id}."""
+    duration = data.get("duration_seconds")
+    dur_str = _format_time(float(duration)) if duration else "0:00"
+
+    if status == "recording":
+        return (
+            f"🔴 <b>Идёт запись</b>  {dur_str}\n\n⏹ Остановить — нажми кнопку или /stop"
+        )
+    if status == "processing":
+        return (
+            f"⏳ <b>Транскрибирую</b>  (длительность {dur_str})\n\n"
+            "Стадии: нормализация → ASR → диаризация → LLM-разметка → Drive"
+        )
+    if status == "done":
+        return f"✅ <b>Готово</b>  ({dur_str})"
+    if status == "error":
+        err = _safe_html(data.get("error_message") or "неизвестная ошибка")
+        return f"❌ <b>Ошибка</b>: {err}"
+    return f"<b>Статус:</b> {_safe_html(status)}  {dur_str}"
 
 
 async def _wait_and_get_transcript(meeting_id: str) -> dict | None:
@@ -571,14 +743,68 @@ async def _send_next_review_item(chat_id: int):
                 title=f"{speaker_label} sample {sample_index + 1}",
             )
 
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⏭ Пропустить", callback_data=CB_REVIEW_SKIP),
+                InlineKeyboardButton(
+                    text="❓ Неизвестный", callback_data=CB_REVIEW_UNKNOWN
+                ),
+            ],
+            [InlineKeyboardButton(text="⏹ Закончить", callback_data=CB_REVIEW_STOP)],
+        ]
+    )
     await bot.send_message(
         chat_id,
         "Кто это?\n"
         f"Текущая метка: <b>{_safe_html(current['current_name'])}</b>\n"
         f"Таймкоды: {_safe_html(_format_segment_preview(current.get('segments', [])))}\n\n"
-        "Просто ответь именем одним сообщением.\n"
-        'Если это тот же человек, напиши то же самое имя без слов вроде "тоже".',
+        "Ответь именем сообщением — или нажми кнопку.",
+        reply_markup=keyboard,
     )
+
+
+@dp.callback_query(F.data == CB_REVIEW_SKIP)
+async def cb_review_skip(cq: CallbackQuery):
+    chat_id = cq.message.chat.id
+    state = pending_reviews.get(chat_id)
+    if not state or not state.get("current"):
+        await cq.answer("Нет активного вопроса.", show_alert=True)
+        return
+    await cq.answer("Пропускаю")
+    with suppress_exc():
+        await cq.message.edit_reply_markup(reply_markup=None)
+    state["current"] = None
+    await _send_next_review_item(chat_id)
+
+
+@dp.callback_query(F.data == CB_REVIEW_UNKNOWN)
+async def cb_review_unknown(cq: CallbackQuery):
+    chat_id = cq.message.chat.id
+    state = pending_reviews.get(chat_id)
+    if not state or not state.get("current"):
+        await cq.answer("Нет активного вопроса.", show_alert=True)
+        return
+    await cq.answer("Помечаю как неизвестного")
+    with suppress_exc():
+        await cq.message.edit_reply_markup(reply_markup=None)
+    # Просто пропускаем — voice_bank не обучается,
+    # и спикер остаётся "Unknown Speaker N" в транскрипте.
+    state["current"] = None
+    await _send_next_review_item(chat_id)
+
+
+@dp.callback_query(F.data == CB_REVIEW_STOP)
+async def cb_review_stop(cq: CallbackQuery):
+    chat_id = cq.message.chat.id
+    if chat_id not in pending_reviews:
+        await cq.answer("Разметка не запущена.", show_alert=True)
+        return
+    pending_reviews.pop(chat_id, None)
+    await cq.answer("Закончил разметку")
+    with suppress_exc():
+        await cq.message.edit_reply_markup(reply_markup=None)
+    await bot.send_message(chat_id, "Остановил разметку новых голосов.")
 
 
 async def _send_transcript(chat_id: int, transcript: dict):
@@ -706,8 +932,7 @@ async def _finalize_meeting_md(chat_id: int, meeting_id: str) -> None:
     if not result:
         await bot.send_message(
             chat_id,
-            "Имена сохранил, но обновить .md в Drive не получилось "
-            "(см. логи бота).",
+            "Имена сохранил, но обновить .md в Drive не получилось (см. логи бота).",
         )
         return
 
@@ -716,7 +941,7 @@ async def _finalize_meeting_md(chat_id: int, meeting_id: str) -> None:
         safe_link = html.escape(link, quote=True)
         await bot.send_message(
             chat_id,
-            f'✅ Транскрипт обновлён с правильными именами: '
+            f"✅ Транскрипт обновлён с правильными именами: "
             f'<a href="{safe_link}">открыть в Drive</a>',
         )
     else:
@@ -746,13 +971,16 @@ async def _handle_trigger_review(request: web.Request) -> web.Response:
     asyncio.create_task(_start_speaker_review(chat_id, meeting_id))
     logger.info(
         "Auto-review triggered: meeting=%s chat=%s filename=%s",
-        meeting_id, chat_id, filename,
+        meeting_id,
+        chat_id,
+        filename,
     )
     return web.json_response({"ok": True})
 
 
 def suppress_exc():
     from contextlib import suppress
+
     return suppress(Exception)
 
 
