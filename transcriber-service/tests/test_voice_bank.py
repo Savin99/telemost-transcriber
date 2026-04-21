@@ -28,7 +28,9 @@ def _write_test_wav(path: Path, amplitude: float = 0.1, duration_seconds: float 
 
 class QueueIdentifier:
     def __init__(self, embeddings):
-        self.embeddings = [l2_normalize(np.asarray(item, dtype=np.float32)) for item in embeddings]
+        self.embeddings = [
+            l2_normalize(np.asarray(item, dtype=np.float32)) for item in embeddings
+        ]
 
     def extract_embedding(self, waveform, sample_rate):
         if not self.embeddings:
@@ -80,8 +82,58 @@ class VoiceBankTests(unittest.TestCase):
             new_embedding = l2_normalize(np.array([0.0, 1.0, 0.0], dtype=np.float32))
             voice_bank.update("Alice", new_embedding, alpha=0.25)
             updated_centroid = voice_bank.get_centroid("Alice")
-            expected_centroid = l2_normalize((previous_centroid * 0.75) + (new_embedding * 0.25))
+            expected_centroid = l2_normalize(
+                (previous_centroid * 0.75) + (new_embedding * 0.25)
+            )
             np.testing.assert_allclose(updated_centroid, expected_centroid, atol=1e-6)
+
+    def test_find_duplicates_and_merge_speakers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "speaker.wav"
+            _write_test_wav(audio_path)
+            voice_bank = VoiceBank(
+                temp_dir,
+                speaker_identifier=QueueIdentifier(
+                    [
+                        [1.0, 0.0, 0.0],
+                        [0.95, 0.1, 0.05],
+                        [0.0, 1.0, 0.0],
+                    ]
+                ),
+            )
+            voice_bank.enroll("Ольга", [str(audio_path)])
+            voice_bank.enroll("Оля", [str(audio_path)])
+            voice_bank.enroll("Илья", [str(audio_path)])
+
+            pairs = voice_bank.find_duplicate_candidates(voice_threshold=0.70)
+            self.assertEqual(len(pairs), 1)
+            pair = pairs[0]
+            self.assertEqual({pair["name_a"], pair["name_b"]}, {"Ольга", "Оля"})
+            self.assertGreater(pair["voice_sim"], 0.99)
+
+            voice_bank.merge_speakers(keep_name="Ольга", merge_name="Оля")
+            remaining = {speaker["name"] for speaker in voice_bank.list_speakers()}
+            self.assertEqual(remaining, {"Ольга", "Илья"})
+            merged_meta = next(
+                speaker
+                for speaker in voice_bank.list_speakers()
+                if speaker["name"] == "Ольга"
+            )
+            self.assertEqual(merged_meta["num_embeddings"], 2)
+            centroid = voice_bank.get_centroid("Ольга")
+            self.assertAlmostEqual(float(np.linalg.norm(centroid)), 1.0, places=5)
+
+    def test_merge_speakers_raises_for_unknown_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "speaker.wav"
+            _write_test_wav(audio_path)
+            voice_bank = VoiceBank(
+                temp_dir,
+                speaker_identifier=QueueIdentifier([[1.0, 0.0, 0.0]]),
+            )
+            voice_bank.enroll("Alice", [str(audio_path)])
+            with self.assertRaises(KeyError):
+                voice_bank.merge_speakers(keep_name="Alice", merge_name="Bob")
 
     def test_remove_deletes_speaker(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -168,7 +220,9 @@ class VoiceBankTests(unittest.TestCase):
                         "segment_embeddings": [
                             l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
                         ],
-                        "centroid": l2_normalize(np.array([0.0, 1.0], dtype=np.float32)),
+                        "centroid": l2_normalize(
+                            np.array([0.0, 1.0], dtype=np.float32)
+                        ),
                     }
                 }
             }

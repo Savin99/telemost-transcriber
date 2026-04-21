@@ -66,7 +66,9 @@ class VoiceBank:
 
         representatives = self._select_representatives(embeddings)
         self._store_speaker_embeddings(name, representatives)
-        logger.info("Enrolled speaker %s with %d embeddings", name, len(representatives))
+        logger.info(
+            "Enrolled speaker %s with %d embeddings", name, len(representatives)
+        )
 
     def enroll_from_diarization(
         self,
@@ -127,6 +129,104 @@ class VoiceBank:
         for key in keys_to_remove:
             del embeddings[key]
         self._persist(index, embeddings)
+
+    def find_duplicate_candidates(
+        self,
+        voice_threshold: float = 0.70,
+    ) -> list[dict[str, Any]]:
+        """Найти пары спикеров с подозрительно близкими центроидами.
+
+        Возвращает список словарей с полями name_a, name_b, voice_sim, name_sim,
+        отсортированный по убыванию voice_sim.
+        """
+        index = self._load_index()
+        centroids = self.get_all_centroids()
+        names = sorted(centroids.keys())
+        pairs: list[dict[str, Any]] = []
+        for i, name_a in enumerate(names):
+            for name_b in names[i + 1 :]:
+                voice_sim = float(np.dot(centroids[name_a], centroids[name_b]))
+                if voice_sim < voice_threshold:
+                    continue
+                name_sim = SequenceMatcher(
+                    None,
+                    name_a.casefold().strip(),
+                    name_b.casefold().strip(),
+                ).ratio()
+                pairs.append(
+                    {
+                        "name_a": name_a,
+                        "name_b": name_b,
+                        "voice_sim": voice_sim,
+                        "name_sim": name_sim,
+                        "num_embeddings_a": index.get(name_a, {}).get(
+                            "num_embeddings", 0
+                        ),
+                        "num_embeddings_b": index.get(name_b, {}).get(
+                            "num_embeddings", 0
+                        ),
+                        "enrolled_at_a": index.get(name_a, {}).get("enrolled_at"),
+                        "enrolled_at_b": index.get(name_b, {}).get("enrolled_at"),
+                    }
+                )
+        pairs.sort(key=lambda pair: pair["voice_sim"], reverse=True)
+        return pairs
+
+    def merge_speakers(self, keep_name: str, merge_name: str):
+        """Слить ``merge_name`` в ``keep_name``: объединить эмбеддинги и пересчитать центроид."""
+        if keep_name == merge_name:
+            raise ValueError("keep_name и merge_name совпадают")
+
+        index = self._load_index()
+        embeddings = self._load_embeddings()
+        if keep_name not in index:
+            raise KeyError(f"Speaker not found: {keep_name}")
+        if merge_name not in index:
+            raise KeyError(f"Speaker not found: {merge_name}")
+
+        keep_vectors: list[np.ndarray] = []
+        merge_vectors: list[np.ndarray] = []
+        prefix_keep = f"{keep_name}_emb_"
+        prefix_merge = f"{merge_name}_emb_"
+        for key, value in embeddings.items():
+            if key.startswith(prefix_keep):
+                keep_vectors.append(value)
+            elif key.startswith(prefix_merge):
+                merge_vectors.append(value)
+
+        if not keep_vectors and not merge_vectors:
+            raise RuntimeError(
+                f"Нет эмбеддингов ни у {keep_name}, ни у {merge_name} — мердж невозможен"
+            )
+
+        combined = keep_vectors + merge_vectors
+        normalized = [l2_normalize(np.asarray(v, dtype=np.float32)) for v in combined]
+
+        for key in [
+            k
+            for k in embeddings
+            if k.startswith(f"{keep_name}_") or k.startswith(f"{merge_name}_")
+        ]:
+            del embeddings[key]
+
+        embeddings[f"{keep_name}_centroid"] = l2_normalize(np.mean(normalized, axis=0))
+        for idx, vector in enumerate(normalized):
+            embeddings[f"{keep_name}_emb_{idx}"] = vector
+
+        keep_metadata = index.get(keep_name, {})
+        index[keep_name] = {
+            "num_embeddings": len(normalized),
+            "enrolled_at": keep_metadata.get("enrolled_at", _utc_now_iso()),
+            "updated_at": _utc_now_iso(),
+        }
+        del index[merge_name]
+        self._persist(index, embeddings)
+        logger.info(
+            "Merged speaker '%s' into '%s' (%d embeddings total)",
+            merge_name,
+            keep_name,
+            len(normalized),
+        )
 
     def list_speakers(self) -> list[dict]:
         index = self._load_index()
@@ -330,7 +430,9 @@ class VoiceBank:
 
         return best_name or candidate_name
 
-    def select_review_segments(self, bundle: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    def select_review_segments(
+        self, bundle: dict[str, Any]
+    ) -> dict[str, list[dict[str, Any]]]:
         centroids = self.get_all_centroids()
         threshold = self._threshold_from_context(bundle)
         selected: dict[str, list[dict[str, Any]]] = {}
@@ -431,7 +533,7 @@ class VoiceBank:
             selected.append(segment)
 
         if len(embedding_segments) > len(segment_embeddings):
-            selected.extend(embedding_segments[len(segment_embeddings):])
+            selected.extend(embedding_segments[len(segment_embeddings) :])
         return selected
 
     def update_bundle_assignment(
@@ -535,7 +637,9 @@ class VoiceBank:
                 if segment_waveform.size == 0:
                     continue
                 embeddings.append(
-                    self.speaker_identifier.extract_embedding(segment_waveform, sample_rate)
+                    self.speaker_identifier.extract_embedding(
+                        segment_waveform, sample_rate
+                    )
                 )
             return embeddings
 
@@ -623,7 +727,9 @@ class VoiceBank:
             cluster_profiles = diarization.get("cluster_profiles")
             if cluster_profiles:
                 for speaker_label, profile in cluster_profiles.items():
-                    for segment in profile.get("embedding_segments") or profile.get("segments", []):
+                    for segment in profile.get("embedding_segments") or profile.get(
+                        "segments", []
+                    ):
                         yield (
                             float(segment["start"]),
                             float(segment["end"]),
@@ -685,7 +791,11 @@ class VoiceBank:
 
         index = self._load_index()
         npz_embeddings = self._load_embeddings()
-        for key in [existing_key for existing_key in npz_embeddings if existing_key.startswith(f"{name}_")]:
+        for key in [
+            existing_key
+            for existing_key in npz_embeddings
+            if existing_key.startswith(f"{name}_")
+        ]:
             del npz_embeddings[key]
 
         npz_embeddings[f"{name}_centroid"] = centroid
@@ -718,8 +828,7 @@ class VoiceBank:
             return {}
         with np.load(path, allow_pickle=False) as handle:
             return {
-                key: np.asarray(handle[key], dtype=np.float32)
-                for key in handle.files
+                key: np.asarray(handle[key], dtype=np.float32) for key in handle.files
             }
 
     def _write_json_atomic(self, path: Path, payload: dict[str, Any]):

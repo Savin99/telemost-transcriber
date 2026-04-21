@@ -33,7 +33,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    enroll_parser = subparsers.add_parser("enroll", help="Enroll a speaker from audio files.")
+    enroll_parser = subparsers.add_parser(
+        "enroll", help="Enroll a speaker from audio files."
+    )
     enroll_parser.add_argument("name")
     enroll_parser.add_argument("audio_paths", nargs="+")
 
@@ -71,7 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("list-speakers", help="List enrolled speakers.")
 
-    remove_parser = subparsers.add_parser("remove", help="Remove a speaker from the voice bank.")
+    remove_parser = subparsers.add_parser(
+        "remove", help="Remove a speaker from the voice bank."
+    )
     remove_parser.add_argument("name")
 
     test_parser = subparsers.add_parser(
@@ -82,6 +86,22 @@ def _build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument("--num-speakers", type=int)
     test_parser.add_argument("--min-speakers", type=int)
     test_parser.add_argument("--max-speakers", type=int)
+
+    merge_parser = subparsers.add_parser(
+        "merge-duplicates",
+        help="Найти пары подозрительно похожих спикеров и склеить их интерактивно.",
+    )
+    merge_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.70,
+        help="Минимальная косинусная схожесть голосов (0..1). По умолчанию 0.70.",
+    )
+    merge_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только показать пары-кандидаты, без интерактивного мерджа.",
+    )
 
     return parser
 
@@ -256,7 +276,9 @@ def _label_meeting_interactively(
 
     for speaker_label in _iter_display_labels(bundle):
         profile = bundle["cluster_profiles"].get(speaker_label, {})
-        current_name, current_confidence, is_known = _current_assignment(bundle, speaker_label)
+        current_name, current_confidence, is_known = _current_assignment(
+            bundle, speaker_label
+        )
         print("")
         print(
             f"{speaker_label}: current={current_name} "
@@ -366,8 +388,66 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Bundle saved to {bundle['bundle_dir']}")
         return 0
 
+    if args.command == "merge-duplicates":
+        return _merge_duplicates_interactive(
+            voice_bank,
+            threshold=args.threshold,
+            dry_run=args.dry_run,
+        )
+
     parser.error(f"Unknown command: {args.command}")
     return 1
+
+
+def _format_pair(pair: dict) -> str:
+    return (
+        f"  [1] {pair['name_a']} "
+        f"(emb={pair['num_embeddings_a']}, enrolled={pair['enrolled_at_a']})\n"
+        f"  [2] {pair['name_b']} "
+        f"(emb={pair['num_embeddings_b']}, enrolled={pair['enrolled_at_b']})\n"
+        f"      голос: {pair['voice_sim']:.3f}   имя: {pair['name_sim']:.3f}"
+    )
+
+
+def _merge_duplicates_interactive(voice_bank, threshold: float, dry_run: bool) -> int:
+    pairs = voice_bank.find_duplicate_candidates(voice_threshold=threshold)
+    if not pairs:
+        print(f"Дубли не найдены (порог голоса {threshold:.2f}).")
+        return 0
+
+    print(f"Найдено пар-кандидатов: {len(pairs)} (порог голоса {threshold:.2f})")
+    if dry_run:
+        for idx, pair in enumerate(pairs, start=1):
+            print(f"\n#{idx}")
+            print(_format_pair(pair))
+        return 0
+
+    merged: set[str] = set()
+    for idx, pair in enumerate(pairs, start=1):
+        if pair["name_a"] in merged or pair["name_b"] in merged:
+            continue
+        print(f"\n#{idx}")
+        print(_format_pair(pair))
+        answer = (
+            input("Оставить [1/2] и слить второго, [s]kip, [q]uit: ").strip().lower()
+        )
+        if answer in {"q", "quit"}:
+            break
+        if answer in {"", "s", "skip"}:
+            continue
+        if answer == "1":
+            keep, drop = pair["name_a"], pair["name_b"]
+        elif answer == "2":
+            keep, drop = pair["name_b"], pair["name_a"]
+        else:
+            print("Непонятный ввод — skip.")
+            continue
+        voice_bank.merge_speakers(keep_name=keep, merge_name=drop)
+        merged.add(drop)
+        print(f"✓ {drop} → {keep}")
+
+    print("\nГотово.")
+    return 0
 
 
 if __name__ == "__main__":
