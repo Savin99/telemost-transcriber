@@ -266,22 +266,26 @@ async def _show_meetings_list(chat_id: int, mode: str = "list", limit: int = 10)
         title = _human_title(filename)
 
         header_line = (
-            f"<b>{idx + 1}.</b> 📅 {_safe_html(created_at)} · ⏱ {duration_text}"
+            f"<b>#{idx + 1}</b> · 📅 {_safe_html(created_at)} · ⏱ {duration_text}"
         )
         if title:
             safe_title = title if len(title) <= 60 else title[:57] + "..."
             lines.append(f"{header_line}\n   {_safe_html(safe_title)}")
+        elif not duration:
+            # Без длительности, без имени — дать хоть какую-то визуальную зацепку
+            hint = meeting_id[:16] + ("…" if len(meeting_id) > 16 else "")
+            lines.append(f"{header_line}  <code>{_safe_html(hint)}</code>")
         else:
             lines.append(header_line)
 
         row: list[InlineKeyboardButton] = [
             InlineKeyboardButton(
-                text="🎙 Голоса",
+                text=f"🎙 #{idx + 1}",
                 callback_data=f"{CB_MEETING_VOICES}{short_id}",
             )
         ]
         if drive_link:
-            row.append(InlineKeyboardButton(text="🔗 Drive", url=drive_link))
+            row.append(InlineKeyboardButton(text=f"🔗 #{idx + 1}", url=drive_link))
         keyboard_rows.append(row)
 
     await bot.send_message(
