@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+echo "[DEPRECATED] Этот скрипт не работает с VDS 193.233.87.211 + Modal." >&2
+echo "Используй: ./deploy_vds.sh (см. ./deploy_vds.sh --help)" >&2
+exit 1
+
 # deploy.sh — быстрый деплой на Vast.ai одной командой
 # Использование:
 #   ./deploy.sh              — push + pull + рестарт всех сервисов

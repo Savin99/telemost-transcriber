@@ -66,36 +66,41 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-## Деплой на Vast.ai
+## Деплой на VDS
 
-### Первичная настройка сервера
+Продакшн-хост: **VDS 193.233.87.211**. GPU-пайплайн вынесен на Modal (`modal_app/whisperx_service.py`). На VDS: supervisord (bot-service + tg-bot + drive-watcher) + Docker (transcriber через Dockerfile.cpu).
+
+### Настройка (один раз)
 
 ```bash
-# На сервере:
-bash /workspace/telemost-transcriber/bootstrap_vast_host.sh
-
-# Заполни /workspace/.bashrc секретами:
-export TG_BOT_TOKEN=...
-export TELEMOST_SERVICE_API_KEY=...
-export HF_TOKEN=...
-# и другие переменные (см. .env.example)
+# Локально:
+cp .env.deploy.example .env.deploy
+# Отредактируй VDS_SSH_HOST/VDS_SSH_PORT/VDS_SSH_USER.
+# SSH-ключ:
+ssh-copy-id root@193.233.87.211
+# Modal (для `./deploy_vds.sh modal`):
+pip3 install --user modal
+modal token new
 ```
+
+Секреты на VDS лежат в `/root/telemost/env.sh` (mode 600) — формат `export VAR=...`. Шаблон переменных — в [.env.example](.env.example).
 
 ### Деплой обновлений
 
 ```bash
-# Локально: создай .env.deploy
-echo 'VAST_SSH="ssh -p PORT root@IP"' > .env.deploy
-
-# Деплой всех сервисов:
-./deploy.sh all
-
-# Деплой конкретного сервиса:
-./deploy.sh tg|watcher|bot|transcriber
-
-# Быстрый деплой через rsync (без git):
-./hotfix.sh bot
+./deploy_vds.sh all                  # modal → transcriber → bot → tg → watcher
+./deploy_vds.sh bot|tg|watcher       # rsync + supervisorctl restart + healthcheck
+./deploy_vds.sh transcriber          # rsync + docker compose up -d --build + healthcheck
+./deploy_vds.sh transcriber --no-build  # без пересборки образа (быстро)
+./deploy_vds.sh modal                # локальный modal deploy modal_app/whisperx_service.py
+./deploy_vds.sh status               # supervisorctl status + docker ps + df -h + free -m
+./deploy_vds.sh logs transcriber     # tail -f logs/transcriber.log
+./deploy_vds.sh restart bot          # только рестарт, без rsync
+./deploy_vds.sh all --dry-run        # план без побочных эффектов
+./deploy_vds.sh --help               # все флаги
 ```
+
+Архив скриптов для старого Vast.ai GPU-хоста — в [`_deprecated/`](_deprecated/).
 
 ## Переменные окружения
 
@@ -124,7 +129,6 @@ CI запускается автоматически на push/PR в main (GitHu
 
 | Скрипт | Назначение |
 |--------|-----------|
-| `deploy.sh` | git push + pull + рестарт сервисов на Vast.ai |
-| `hotfix.sh` | rsync + рестарт (без git, для быстрых итераций) |
-| `bootstrap_vast_host.sh` | Первичная настройка Vast.ai сервера |
-| `remote/restart_service.sh` | Скрипт рестарта, исполняемый на сервере |
+| `deploy_vds.sh` | Единый deploy на VDS: rsync + supervisorctl/docker + healthcheck + Modal deploy |
+| `remote/rotate_logs.sh` | Хостовой logrotate, cron на VDS каждый час |
+| `_deprecated/` | Архив Vast.ai-эпохи. Не запускать — выдают `[DEPRECATED]` + exit 1. |
