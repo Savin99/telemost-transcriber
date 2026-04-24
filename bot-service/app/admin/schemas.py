@@ -123,3 +123,89 @@ class BulkResult(BaseModel):
 
     updated: list[str]
     not_found: list[str]
+
+
+# --- AdminSettings: read-only overlay поверх env (Фаза 5) -----------------
+# PATCH /admin/api/settings не переписывает env.sh, только сохраняет JSON
+# в ADMIN_SETTINGS_PATH. Все поля имеют дефолты; extra="allow" на верхнем
+# уровне для forward-compat (новые секции не роняют старый клиент).
+
+
+class AdminSettingsGeneral(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    bot_name: str = "Транскрибатор"
+    timezone: str = "Europe/Moscow"
+
+
+class AdminSettingsASR(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    modal_backend: str = "modal"
+    num_speakers_default: int = 2
+
+
+class AdminSettingsDiarization(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    min_confidence: float = 0.40
+    review_threshold: float = 0.70
+
+
+class AdminSettingsLLM(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    anthropic_model: str = "claude-sonnet-4-6"
+    refiner_enabled: bool = True
+
+
+class AdminSettingsVoiceBank(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    fuzzy_dedup_threshold: float = 0.85
+    high_confidence_threshold: float = 0.70
+
+
+class AdminSettingsIntegrations(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    gdrive_root_folder_id: str = ""
+
+
+class AdminSettingsAdvanced(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    debug_mode: bool = False
+    log_level: str = "INFO"
+
+
+class AdminSettings(BaseModel):
+    """Полный overlay admin-настроек. Все секции имеют дефолты."""
+
+    model_config = ConfigDict(extra="allow")
+
+    general: AdminSettingsGeneral = Field(default_factory=AdminSettingsGeneral)
+    asr: AdminSettingsASR = Field(default_factory=AdminSettingsASR)
+    diarization: AdminSettingsDiarization = Field(
+        default_factory=AdminSettingsDiarization
+    )
+    llm: AdminSettingsLLM = Field(default_factory=AdminSettingsLLM)
+    voice_bank: AdminSettingsVoiceBank = Field(default_factory=AdminSettingsVoiceBank)
+    integrations: AdminSettingsIntegrations = Field(
+        default_factory=AdminSettingsIntegrations
+    )
+    advanced: AdminSettingsAdvanced = Field(default_factory=AdminSettingsAdvanced)
+
+
+class AdminSettingsUpdate(BaseModel):
+    """PATCH /admin/api/settings: все поля опциональны, extra=allow для forward-compat."""
+
+    model_config = ConfigDict(extra="allow")
+
+    general: dict[str, Any] | None = None
+    asr: dict[str, Any] | None = None
+    diarization: dict[str, Any] | None = None
+    llm: dict[str, Any] | None = None
+    voice_bank: dict[str, Any] | None = None
+    integrations: dict[str, Any] | None = None
+    advanced: dict[str, Any] | None = None

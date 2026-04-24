@@ -78,6 +78,8 @@ class AiStatusResponse(BaseModel):
 class TranscribeResponse(BaseModel):
     segments: list[SegmentResponse]
     ai_status: AiStatusResponse | None = None
+    # metrics: modal_seconds, claude_*_tokens, *_cost_usd, preprocessing — для admin-панели.
+    metrics: dict[str, Any] = {}
 
 
 class SpeakerReviewRequest(BaseModel):
@@ -161,6 +163,7 @@ async def transcribe(request: TranscribeRequest):
                 speaker_refinement=result.ai_status.speaker_refinement,
                 transcript_refinement=result.ai_status.transcript_refinement,
             ),
+            metrics=dict(result.metrics or {}),
         )
     except Exception as e:
         logger.exception("Transcription failed")

@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -31,13 +32,33 @@ REVIEW_NAME_PREFIXES = (
 )
 
 _STATIC_ASR_TERMS: tuple[str, ...] = (
-    "Яндекс Телемост", "Telemost", "WhisperX", "pyannote", "Claude",
-    "Opus", "Sonnet", "Anthropic", "Google Drive",
-    "транскрибация", "диаризация", "спикер",
-    "QA", "CI/CD", "Docker", "FastAPI", "Python",
-    "Vast.ai", "GPU", "API",
-    "Валамис", "Harness", "roadmap", "бэклог", "фича",
-    "деплой", "пайплайн",
+    "Яндекс Телемост",
+    "Telemost",
+    "WhisperX",
+    "pyannote",
+    "Claude",
+    "Opus",
+    "Sonnet",
+    "Anthropic",
+    "Google Drive",
+    "транскрибация",
+    "диаризация",
+    "спикер",
+    "QA",
+    "CI/CD",
+    "Docker",
+    "FastAPI",
+    "Python",
+    "Vast.ai",
+    "GPU",
+    "API",
+    "Валамис",
+    "Harness",
+    "roadmap",
+    "бэклог",
+    "фича",
+    "деплой",
+    "пайплайн",
 )
 _INITIAL_PROMPT_MAX_CHARS = 900
 
@@ -62,7 +83,7 @@ def normalize_review_speaker_name(name: str) -> str:
         lowered = candidate.casefold()
         for prefix in REVIEW_NAME_PREFIXES:
             if lowered.startswith(prefix):
-                stripped = candidate[len(prefix):].strip(" \t-:,!?")
+                stripped = candidate[len(prefix) :].strip(" \t-:,!?")
                 if stripped:
                     candidate = stripped
                     changed = True
@@ -92,6 +113,8 @@ class AiStatus:
 class TranscribeResult:
     segments: list[TranscribedSegment]
     ai_status: AiStatus = field(default_factory=AiStatus)
+    # metrics: wall-time + токены Claude + стоимости + размеры аудио
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 class TranscriberPipeline:
@@ -100,6 +123,7 @@ class TranscriberPipeline:
     def __init__(self, device: str = "auto"):
         if device == "auto":
             import torch
+
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             self.device = device
@@ -150,6 +174,7 @@ class TranscriberPipeline:
     def asr_model(self):
         if self._asr_model is None:
             import whisperx
+
             self._asr_model = whisperx.load_model(
                 "large-v3",
                 device=self.device,
@@ -218,25 +243,29 @@ class TranscriberPipeline:
                         "Fb": float(os.getenv("CLUSTERING_FB", "0.9")),
                     },
                     "segmentation": {
-                    "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
-                },
+                        "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
+                    },
                 }
             else:
                 # Агломеративная кластеризация (3.1)
                 params = {
                     "clustering": {
                         "method": "centroid",
-                        "min_cluster_size": int(os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")),
+                        "min_cluster_size": int(
+                            os.getenv("CLUSTERING_MIN_CLUSTER_SIZE", "15")
+                        ),
                         "threshold": float(os.getenv("CLUSTERING_THRESHOLD", "0.55")),
                     },
                     "segmentation": {
-                    "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
-                },
+                        "min_duration_off": float(os.getenv("MIN_DURATION_OFF", "0.5")),
+                    },
                 }
 
             self._diarize_model.model.instantiate(params)
             logger.info(
-                "Diarization model loaded: %s, params: %s", model_name, params,
+                "Diarization model loaded: %s, params: %s",
+                model_name,
+                params,
             )
 
         return self._diarize_model
@@ -327,7 +356,9 @@ class TranscriberPipeline:
     ) -> dict[str, Any]:
         bundle = self.voice_bank.load_meeting_bundle_by_key(meeting_key)
         if bundle is None:
-            raise FileNotFoundError(f"Review bundle not found for meeting {meeting_key}")
+            raise FileNotFoundError(
+                f"Review bundle not found for meeting {meeting_key}"
+            )
 
         mapping = bundle.get("mapping", {})
         current_assignment = mapping.get(speaker_label)
@@ -373,6 +404,19 @@ class TranscriberPipeline:
         logger.info("Transcribing %s (num_speakers=%s)", audio_path, num_speakers)
 
         with normalized_audio_file(audio_path) as normalized_audio:
+            # Сбрасываем кумулятивную usage-статистику refiner'ов перед стартом,
+            # иначе токены копились бы между вызовами одного и того же pipeline.
+            if self._speaker_refiner is not None:
+                self._speaker_refiner.last_usage = {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+            if self._transcript_refiner is not None:
+                self._transcript_refiner.last_usage = {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                }
+
             audio = whisperx.load_audio(normalized_audio.normalized_path)
 
             # 1. Транскрипция
@@ -391,7 +435,11 @@ class TranscriberPipeline:
                         "Failed to apply initial_prompt via asr_model.options",
                         exc_info=True,
                     )
+            # Wall-time вокруг ASR — идёт в metrics.modal_seconds. Для локального
+            # бэкенда это тоже полезная метрика длительности транскрипции.
+            asr_started_at = time.perf_counter()
             result = self.asr_model.transcribe(audio, **transcribe_kwargs)
+            modal_seconds = max(0.0, time.perf_counter() - asr_started_at)
             logger.info("ASR produced %d segments", len(result["segments"]))
 
             # 2. Word-level alignment для русского
@@ -440,8 +488,12 @@ class TranscriberPipeline:
             ai_status = AiStatus()
             segments = self._build_transcribed_segments(result["segments"], mapping)
             segments = self._repair_short_replies(segments)
-            segments, ai_status.speaker_refinement = self._refine_speakers_with_llm(segments)
-            segments, ai_status.transcript_refinement = self._refine_transcript_text_with_llm(segments)
+            segments, ai_status.speaker_refinement = self._refine_speakers_with_llm(
+                segments
+            )
+            segments, ai_status.transcript_refinement = (
+                self._refine_transcript_text_with_llm(segments)
+            )
             seen_names = {
                 segment.speaker for segment in segments if segment.speaker is not None
             }
@@ -452,14 +504,91 @@ class TranscriberPipeline:
                 len(seen_names),
                 ai_status,
             )
-            return TranscribeResult(segments=segments, ai_status=ai_status)
+            metrics = self._build_metrics(
+                modal_seconds=modal_seconds,
+                source_path=audio_path,
+                processed_path=normalized_audio.normalized_path,
+            )
+            return TranscribeResult(
+                segments=segments, ai_status=ai_status, metrics=metrics
+            )
+
+    def _build_metrics(
+        self,
+        *,
+        modal_seconds: float,
+        source_path: str,
+        processed_path: str,
+    ) -> dict[str, Any]:
+        """Собирает metrics-блок для TranscribeResult.
+
+        Токены берутся из refiner.last_usage (если refiner инициализирован и
+        вызывался). Стоимости считаются через env-константы; если не задано —
+        0.0 (TODO: выставить дефолты в docker-compose.yml после прод-деплоя).
+        """
+        claude_input = 0
+        claude_output = 0
+        if self._speaker_refiner is not None:
+            claude_input += int(
+                self._speaker_refiner.last_usage.get("input_tokens") or 0
+            )
+            claude_output += int(
+                self._speaker_refiner.last_usage.get("output_tokens") or 0
+            )
+        if self._transcript_refiner is not None:
+            claude_input += int(
+                self._transcript_refiner.last_usage.get("input_tokens") or 0
+            )
+            claude_output += int(
+                self._transcript_refiner.last_usage.get("output_tokens") or 0
+            )
+
+        def _env_float(name: str) -> float:
+            try:
+                raw = os.getenv(name)
+                return float(raw) if raw is not None and raw.strip() else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        asr_usd_per_second = _env_float("ASR_USD_PER_SECOND")
+        claude_in_per_1k = _env_float("CLAUDE_USD_PER_1K_INPUT")
+        claude_out_per_1k = _env_float("CLAUDE_USD_PER_1K_OUTPUT")
+
+        modal_cost_usd = round(modal_seconds * asr_usd_per_second, 6)
+        claude_cost_usd = round(
+            claude_input / 1000.0 * claude_in_per_1k
+            + claude_output / 1000.0 * claude_out_per_1k,
+            6,
+        )
+
+        def _mb(path: str) -> float:
+            try:
+                return round(os.path.getsize(path) / (1024 * 1024), 4)
+            except OSError:
+                return 0.0
+
+        return {
+            "modal_seconds": round(float(modal_seconds), 3),
+            "claude_input_tokens": int(claude_input),
+            "claude_output_tokens": int(claude_output),
+            "modal_cost_usd": modal_cost_usd,
+            "claude_cost_usd": claude_cost_usd,
+            "preprocessing": {
+                "source_mb": _mb(source_path),
+                "processed_mb": _mb(processed_path),
+            },
+        }
 
     def _build_initial_prompt(self) -> str:
         try:
             speakers = self.voice_bank.list_speakers()
-            names = sorted({str(entry["name"]) for entry in speakers if entry.get("name")})
+            names = sorted(
+                {str(entry["name"]) for entry in speakers if entry.get("name")}
+            )
         except Exception:
-            logger.warning("Failed to load voice_bank names for initial_prompt", exc_info=True)
+            logger.warning(
+                "Failed to load voice_bank names for initial_prompt", exc_info=True
+            )
             names = []
         terms: list[str] = list(names) + list(_STATIC_ASR_TERMS)
         prompt = ", ".join(terms)
@@ -483,7 +612,9 @@ class TranscriberPipeline:
             return segments, "disabled"
         try:
             refined = self.speaker_refiner.refine(segments)
-            changed = sum(1 for a, b in zip(segments, refined) if a.speaker != b.speaker)
+            changed = sum(
+                1 for a, b in zip(segments, refined) if a.speaker != b.speaker
+            )
             return refined, f"applied ({changed} changes)"
         except Exception as exc:
             logger.warning("Speaker LLM refinement failed: %s", exc)
@@ -546,7 +677,9 @@ class TranscriberPipeline:
             if not text:
                 continue
 
-            speaker = self._map_speaker_name(word.get("speaker"), mapping) or fallback_speaker
+            speaker = (
+                self._map_speaker_name(word.get("speaker"), mapping) or fallback_speaker
+            )
             start = float(word.get("start", segment["start"]))
             end = float(word.get("end", start))
             if current_chunk is None or current_chunk["speaker"] != speaker:
@@ -1104,7 +1237,9 @@ class TranscriberPipeline:
             )
             profile["segments"].append({"start": start, "end": end})
 
-        native_embeddings = self._normalize_native_speaker_embeddings(speaker_embeddings)
+        native_embeddings = self._normalize_native_speaker_embeddings(
+            speaker_embeddings
+        )
         if self._can_use_native_speaker_embeddings() and native_embeddings:
             for speaker_label, embedding in native_embeddings.items():
                 profile = cluster_profiles.setdefault(
@@ -1152,7 +1287,9 @@ class TranscriberPipeline:
 
         return cluster_profiles
 
-    def _normalize_native_speaker_embeddings(self, speaker_embeddings) -> dict[str, np.ndarray]:
+    def _normalize_native_speaker_embeddings(
+        self, speaker_embeddings
+    ) -> dict[str, np.ndarray]:
         if not speaker_embeddings:
             return {}
         if not hasattr(speaker_embeddings, "items"):

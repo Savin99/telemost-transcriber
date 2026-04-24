@@ -45,6 +45,9 @@ class AnthropicAdvisorTranscriptRefiner:
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
         self.max_changes = max_changes
+        # Кумулятивная usage-статистика (input/output токены), обновляется
+        # после каждого вызова _log_cache_usage. Читается пайплайном для metrics.
+        self.last_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
     @classmethod
     def from_env(cls):
@@ -67,7 +70,9 @@ class AnthropicAdvisorTranscriptRefiner:
 
     def refine(self, segments: list[Any]) -> list[Any]:
         if not self.api_key:
-            logger.warning("ANTHROPIC_API_KEY is not set; transcript LLM refinement skipped")
+            logger.warning(
+                "ANTHROPIC_API_KEY is not set; transcript LLM refinement skipped"
+            )
             return segments
 
         if not segments:
@@ -90,7 +95,8 @@ class AnthropicAdvisorTranscriptRefiner:
 
         refined_segments = self.apply_changes(segments=segments, payload=change_payload)
         changed = sum(
-            1 for before, after in zip(segments, refined_segments)
+            1
+            for before, after in zip(segments, refined_segments)
             if before.text != after.text
         )
         logger.info("Transcript LLM refinement applied %d text changes", changed)
@@ -216,6 +222,12 @@ class AnthropicAdvisorTranscriptRefiner:
 
     def _log_cache_usage(self, response_payload: dict[str, Any]) -> None:
         usage = response_payload.get("usage") or {}
+        # Копим токены в last_usage — пайплайн читает их для metrics.claude_*.
+        try:
+            self.last_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
+            self.last_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
         logger.info(
             "Transcript LLM usage: input=%s output=%s cache_write=%s cache_read=%s",
             usage.get("input_tokens"),
@@ -234,7 +246,7 @@ class AnthropicAdvisorTranscriptRefiner:
             end = text.rfind("}")
             if start < 0 or end <= start:
                 raise ValueError("JSON object not found") from None
-            payload = json.loads(text[start:end + 1])
+            payload = json.loads(text[start : end + 1])
         if not isinstance(payload, dict):
             raise ValueError("top-level JSON is not an object")
         return payload
@@ -268,7 +280,7 @@ class AnthropicAdvisorTranscriptRefiner:
             "is needed (one name/term spelled across the transcript), consult the "
             "advisor.\n\n"
             "Return ONLY JSON with this schema: "
-            "{\"changes\":[{\"index\":0,\"text\":\"updated text\","
-            "\"confidence\":0.0,\"reason\":\"short reason\"}]}. "
+            '{"changes":[{"index":0,"text":"updated text",'
+            '"confidence":0.0,"reason":"short reason"}]}. '
             "Omit unchanged segments."
         )
