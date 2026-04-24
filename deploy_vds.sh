@@ -493,6 +493,42 @@ backup_env_sh() {
   ok "Backup env.sh"
 }
 
+# ─────────── Active-bot guard ───────────
+# Перед рестартом bot-service проверяем /health.active_bots: рестарт
+# telemost-stack убивает активные записи встреч (MEMORY.md / supervisor_group_restart).
+# Override: FORCE_DEPLOY=1 или --force.
+check_active_bots_guard() {
+  local label="${1:-bot-service}"
+  local active=""
+  local remote_cmd='source '"$REMOTE_ENV"' 2>/dev/null; curl -fsS --max-time 5 -H "X-API-Key: $TELEMOST_SERVICE_API_KEY" http://127.0.0.1:'"$REMOTE_BOT_PORT"'/health 2>/dev/null || true'
+  set +e
+  local body
+  body=$(ssh_exec_ro "$remote_cmd" 2>/dev/null)
+  set -e
+  if [[ -z "$body" ]]; then
+    warn "Не удалось получить /health — пропускаем active-bots guard ($label)."
+    return 0
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    active=$(printf '%s' "$body" | jq -r '.active_bots // 0' 2>/dev/null || echo "0")
+  else
+    # Fallback без jq — примитивный парс целого числа после "active_bots"
+    active=$(printf '%s' "$body" | grep -oE '"active_bots"[[:space:]]*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+$' | head -1)
+  fi
+  active="${active:-0}"
+  if [[ "$active" =~ ^[0-9]+$ ]] && (( active > 0 )); then
+    if (( FORCE )) || [[ "${FORCE_DEPLOY:-0}" == "1" ]]; then
+      warn "active_bots=$active, но FORCE/FORCE_DEPLOY=1 — продолжаем (активные записи оборвутся)."
+      ((WARNINGS_COUNT++)) || true
+      return 0
+    fi
+    err "Abort: active_bots=$active ($label). Рестарт убьёт активные записи."
+    err "Подожди их завершения или запусти с FORCE_DEPLOY=1 / --force."
+    exit 2
+  fi
+  log "active_bots=$active — guard пройден ($label)."
+}
+
 # ─────────── Supervisord helpers ───────────
 sup_restart() {
   local svc="$1"
@@ -594,6 +630,8 @@ deploy_bot() {
   if (( LAZY )) && [[ "$RSYNC_TRANSFERRED" == "0" ]]; then
     log "Нет изменений — не рестартим (--lazy)"
   else
+    # Guard: активные записи встречи не должны быть убиты рестартом
+    check_active_bots_guard "deploy_bot"
     sup_restart "$SUP_BOT"
   fi
   (( SKIP_HEALTH )) && return 0
@@ -739,7 +777,11 @@ deploy_all() {
 cmd_restart() {
   step "=== Restart only: $RESTART_SVC ==="
   case "$RESTART_SVC" in
-    bot)         sup_restart "$SUP_BOT"; (( SKIP_HEALTH )) || wait_supervisor_running "$SUP_BOT" 3 ;;
+    bot)
+      check_active_bots_guard "restart bot"
+      sup_restart "$SUP_BOT"
+      (( SKIP_HEALTH )) || wait_supervisor_running "$SUP_BOT" 3
+      ;;
     tg)          sup_restart "$SUP_TG"; (( SKIP_HEALTH )) || wait_supervisor_running "$SUP_TG" 3 ;;
     watcher)     sup_restart "$SUP_WATCHER"; (( SKIP_HEALTH )) || wait_supervisor_running "$SUP_WATCHER" 3 ;;
     transcriber)
@@ -773,6 +815,15 @@ cmd_status() {
     echo
     echo '--- docker ps (telemost) ---'
     docker ps --filter name=telemost --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+    echo
+    echo '--- bot-service /health (active_bots) ---'
+    source '$REMOTE_ENV' 2>/dev/null
+    body=\$(curl -fsS --max-time 5 -H \"X-API-Key: \$TELEMOST_SERVICE_API_KEY\" http://127.0.0.1:${REMOTE_BOT_PORT}/health 2>/dev/null || echo '{}')
+    echo \"\$body\"
+    if command -v jq >/dev/null 2>&1; then
+      echo -n 'active_bots: '
+      echo \"\$body\" | jq -r '.active_bots // \"?\"'
+    fi
     echo
     echo '--- disk / ram ---'
     df -h /

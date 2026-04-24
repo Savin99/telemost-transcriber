@@ -80,6 +80,16 @@ class AdminBasicAuthTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("TeleScribe", response.text)
 
+    def test_logout_returns_401_with_new_realm(self):
+        """GET /admin/api/logout после валидной auth отдаёт 401 с realm=logout,
+        чтобы браузер сбросил Basic-кэш."""
+        with TestClient(self.main.app) as client:
+            response = client.get("/admin/api/logout", auth=("testadmin", "testpass"))
+        self.assertEqual(response.status_code, 401)
+        www_auth = response.headers.get("WWW-Authenticate", "")
+        self.assertIn("Basic", www_auth)
+        self.assertIn('realm="logout"', www_auth)
+
 
 if __name__ == "__main__":
     unittest.main()
