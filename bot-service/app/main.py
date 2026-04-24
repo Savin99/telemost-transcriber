@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .admin.router import admin_router
 from .audio_capture import AudioCapture
 from .database import (
     Meeting,
@@ -93,6 +95,14 @@ def _load_service_api_key() -> str:
     if not api_key:
         raise RuntimeError("TELEMOST_SERVICE_API_KEY must be set")
     return api_key
+
+
+def _load_admin_credentials() -> tuple[str, str]:
+    username = os.getenv("ADMIN_USERNAME", "").strip()
+    password = os.getenv("ADMIN_PASSWORD", "").strip()
+    if not username or not password:
+        raise RuntimeError("ADMIN_USERNAME and ADMIN_PASSWORD must be set")
+    return username, password
 
 
 async def require_api_key(
@@ -272,6 +282,7 @@ async def _upload_recording_to_drive(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.service_api_key = _load_service_api_key()
+    app.state.admin_creds = _load_admin_credentials()
     validate_required_env()
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
     await init_db()
@@ -284,8 +295,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Telemost Bot",
     lifespan=lifespan,
-    dependencies=[Depends(require_api_key)],
 )
+
+# Существующие endpoints живут на этом роутере под X-API-Key.
+# /admin/api/* регистрируется через admin_router под HTTP Basic.
+bot_router = APIRouter(dependencies=[Depends(require_api_key)])
+
+_STATIC_ADMIN_DIR = Path(__file__).parent / "static" / "admin"
 
 
 async def _bot_workflow(
@@ -525,7 +541,9 @@ async def _stop_session(meeting_id: str):
     return duration
 
 
-@app.post("/join", response_model=MeetingStatus, response_model_exclude_none=True)
+@bot_router.post(
+    "/join", response_model=MeetingStatus, response_model_exclude_none=True
+)
 async def join_meeting(
     request: JoinRequest,
     session: AsyncSession = Depends(get_session),
@@ -562,7 +580,7 @@ async def join_meeting(
     return _build_meeting_status(meeting)
 
 
-@app.post("/leave/{meeting_id}", response_model=MeetingStatus)
+@bot_router.post("/leave/{meeting_id}", response_model=MeetingStatus)
 async def leave_meeting(
     meeting_id: str,
     session: AsyncSession = Depends(get_session),
@@ -598,7 +616,7 @@ async def leave_meeting(
     return _build_meeting_status(meeting)
 
 
-@app.get("/status/{meeting_id}", response_model=MeetingStatus)
+@bot_router.get("/status/{meeting_id}", response_model=MeetingStatus)
 async def get_status(
     meeting_id: str,
     session: AsyncSession = Depends(get_session),
@@ -616,7 +634,7 @@ async def get_status(
     return _build_meeting_status(meeting, duration_seconds=duration)
 
 
-@app.get("/transcripts/{meeting_id}", response_model=TranscriptResponse)
+@bot_router.get("/transcripts/{meeting_id}", response_model=TranscriptResponse)
 async def get_transcript(
     meeting_id: str,
     session: AsyncSession = Depends(get_session),
@@ -659,7 +677,7 @@ async def get_transcript(
     )
 
 
-@app.get("/meetings", response_model=list[MeetingStatus])
+@bot_router.get("/meetings", response_model=list[MeetingStatus])
 async def list_meetings(
     status: str | None = None,
     limit: int = 10,
@@ -679,7 +697,7 @@ async def list_meetings(
     return [_build_meeting_status(meeting) for meeting in meetings]
 
 
-@app.post(
+@bot_router.post(
     "/meetings/{meeting_id}/speaker-review",
     response_model=SpeakerReviewResponse,
 )
@@ -735,7 +753,7 @@ async def review_unknown_speakers(
     )
 
 
-@app.get(
+@bot_router.get(
     "/meetings/{meeting_id}/speaker-review/{meeting_key}/{speaker_label}/samples/{sample_index}"
 )
 async def download_speaker_review_sample(
@@ -771,7 +789,7 @@ async def download_speaker_review_sample(
     )
 
 
-@app.post(
+@bot_router.post(
     "/meetings/{meeting_id}/speaker-review/{meeting_key}/{speaker_label}/label",
     response_model=SpeakerLabelResponse,
 )
@@ -831,7 +849,18 @@ async def label_speaker_review(
     )
 
 
-@app.get("/health", response_model=HealthResponse)
+@bot_router.get("/health", response_model=HealthResponse)
 async def health():
     """Health check."""
     return HealthResponse(status="ok", active_bots=len(active_sessions))
+
+
+app.include_router(bot_router)
+# ВАЖНО: admin_router регистрируем ДО mount("/admin", ...), иначе StaticFiles
+# перехватит запросы к /admin/api/* и отдаст 404.
+app.include_router(admin_router)
+app.mount(
+    "/admin",
+    StaticFiles(directory=str(_STATIC_ADMIN_DIR), html=True),
+    name="admin",
+)
