@@ -235,6 +235,249 @@ class VoiceBank:
             speakers.append({"name": name, **index[name]})
         return speakers
 
+    def rename(self, old_name: str, new_name: str) -> bool:
+        """Переименовать спикера в index.json и ключах embeddings.npz.
+
+        Возвращает True если переименование прошло, False — если old_name не найден.
+        Кидает ValueError, если new_name уже существует или равен old_name.
+        """
+        if not new_name or not new_name.strip():
+            raise ValueError("new_name is empty")
+        if old_name == new_name:
+            raise ValueError("old_name и new_name совпадают")
+
+        index = self._load_index()
+        if old_name not in index:
+            return False
+        if new_name in index:
+            raise ValueError(f"Speaker {new_name!r} уже существует")
+
+        embeddings = self._load_embeddings()
+
+        # Перекладываем метаданные
+        metadata = index.pop(old_name)
+        metadata["updated_at"] = _utc_now_iso()
+        index[new_name] = metadata
+
+        # Перекладываем все ключи {old_name}_... -> {new_name}_...
+        renamed: dict[str, np.ndarray] = {}
+        for key, value in embeddings.items():
+            if key == f"{old_name}_centroid":
+                renamed[f"{new_name}_centroid"] = value
+            elif key.startswith(f"{old_name}_emb_"):
+                suffix = key[len(f"{old_name}_emb_") :]
+                renamed[f"{new_name}_emb_{suffix}"] = value
+            elif key.startswith(f"{old_name}_"):
+                suffix = key[len(f"{old_name}_") :]
+                renamed[f"{new_name}_{suffix}"] = value
+            else:
+                renamed[key] = value
+
+        self._persist(index, renamed)
+        logger.info("Renamed speaker %r -> %r", old_name, new_name)
+        return True
+
+    def merge(self, source: str, target: str) -> int:
+        """Объединить ``source`` в ``target``: эмбеддинги source перекладываются
+        в target, centroid пересчитывается как среднее, source удаляется.
+
+        Если в index.json есть ``sample_segments`` и/или ``n_samples`` — они
+        агрегируются (склеиваются/суммируются). Возвращает новое количество
+        эмбеддингов у target (n_samples).
+        """
+        if source == target:
+            raise ValueError("source и target совпадают")
+
+        index = self._load_index()
+        if source not in index:
+            raise KeyError(f"Speaker not found: {source}")
+        if target not in index:
+            raise KeyError(f"Speaker not found: {target}")
+
+        embeddings = self._load_embeddings()
+
+        # Собираем эмбеддинги обеих сторон
+        source_emb_keys = [k for k in embeddings if k.startswith(f"{source}_emb_")]
+        target_emb_keys = [k for k in embeddings if k.startswith(f"{target}_emb_")]
+
+        combined_vectors: list[np.ndarray] = []
+        for key in target_emb_keys:
+            combined_vectors.append(
+                l2_normalize(np.asarray(embeddings[key], dtype=np.float32))
+            )
+        for key in source_emb_keys:
+            combined_vectors.append(
+                l2_normalize(np.asarray(embeddings[key], dtype=np.float32))
+            )
+
+        if not combined_vectors:
+            raise RuntimeError(
+                f"Нет эмбеддингов ни у {source!r}, ни у {target!r} — merge невозможен"
+            )
+
+        # Чистим все ключи source и target
+        keys_to_remove = [
+            k
+            for k in embeddings
+            if k.startswith(f"{source}_") or k.startswith(f"{target}_")
+        ]
+        for key in keys_to_remove:
+            del embeddings[key]
+
+        # Пишем новые эмбеддинги под target
+        embeddings[f"{target}_centroid"] = l2_normalize(
+            np.mean(combined_vectors, axis=0)
+        )
+        for idx, vector in enumerate(combined_vectors):
+            embeddings[f"{target}_emb_{idx}"] = vector
+
+        # Обновляем метаданные target, агрегируя n_samples/sample_segments если есть
+        source_meta = index[source]
+        target_meta = index[target]
+
+        n_samples_source = int(
+            source_meta.get("n_samples", source_meta.get("num_embeddings", 0)) or 0
+        )
+        n_samples_target = int(
+            target_meta.get("n_samples", target_meta.get("num_embeddings", 0)) or 0
+        )
+        new_n_samples = n_samples_target + n_samples_source
+
+        merged_metadata: dict[str, Any] = dict(target_meta)
+        merged_metadata["num_embeddings"] = len(combined_vectors)
+        merged_metadata["updated_at"] = _utc_now_iso()
+
+        if "n_samples" in target_meta or "n_samples" in source_meta:
+            merged_metadata["n_samples"] = new_n_samples
+
+        if "sample_segments" in target_meta or "sample_segments" in source_meta:
+            merged_metadata["sample_segments"] = list(
+                target_meta.get("sample_segments") or []
+            ) + list(source_meta.get("sample_segments") or [])
+
+        index[target] = merged_metadata
+        del index[source]
+
+        self._persist(index, embeddings)
+        logger.info(
+            "Merged speaker %r -> %r (now %d embeddings, n_samples=%d)",
+            source,
+            target,
+            len(combined_vectors),
+            new_n_samples,
+        )
+        return new_n_samples if new_n_samples else len(combined_vectors)
+
+    def similarity_matrix(self) -> dict[str, dict[str, float]]:
+        """Попарная cosine-similarity между centroid'ами всех known speakers.
+
+        Возвращает словарь ``{speaker_A: {speaker_B: cosine, ...}}``. Диагональ
+        заполнена единицами (A vs A). Пустой словарь — если спикеров нет.
+        """
+        centroids = self.get_all_centroids()
+        names = sorted(centroids.keys())
+        matrix: dict[str, dict[str, float]] = {name: {} for name in names}
+        for i, name_a in enumerate(names):
+            matrix[name_a][name_a] = 1.0
+            for name_b in names[i + 1 :]:
+                score = float(np.dot(centroids[name_a], centroids[name_b]))
+                matrix[name_a][name_b] = score
+                matrix[name_b][name_a] = score
+        return matrix
+
+    def list_review_queue(self) -> list[dict[str, Any]]:
+        """Собрать review-items из всех bundle.json в meetings/.
+
+        Для каждой встречи с bundle.json — итерируемся по cluster_profiles и
+        формируем элемент review-очереди на КАЖДЫЙ кластер, где assignment либо
+        unknown (is_known=false), либо отсутствует. Возвращает список словарей
+        с полями {meeting_id, cluster_label, confidence, samples, candidates}.
+        """
+        if not self.meetings_dir.exists():
+            return []
+
+        centroids = self.get_all_centroids()
+        items: list[dict[str, Any]] = []
+        for meeting_dir in sorted(self.meetings_dir.iterdir()):
+            if not meeting_dir.is_dir():
+                continue
+            bundle_path = meeting_dir / "bundle.json"
+            if not bundle_path.exists():
+                continue
+            try:
+                with bundle_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Failed to read bundle %s: %s", bundle_path, exc)
+                continue
+
+            meeting_id = str(payload.get("meeting_key") or meeting_dir.name)
+            ordered_labels = list(payload.get("ordered_labels") or [])
+            cluster_profiles = payload.get("cluster_profiles") or {}
+            for label in ordered_labels or list(cluster_profiles.keys()):
+                profile = cluster_profiles.get(label)
+                if not profile:
+                    continue
+                assignment = profile.get("assignment") or {}
+                is_known = bool(assignment.get("is_known"))
+                if is_known:
+                    continue
+                confidence = float(assignment.get("confidence") or 0.0)
+
+                # Samples — ссылки на готовые wav в {meeting_dir}/samples/
+                samples_dir = meeting_dir / "samples"
+                samples: list[dict[str, Any]] = []
+                if samples_dir.exists():
+                    for sample_path in sorted(samples_dir.glob(f"{label}_*.wav")):
+                        stem = sample_path.stem  # e.g. SPEAKER_00_0
+                        try:
+                            sample_index = int(stem.rsplit("_", 1)[1])
+                        except (IndexError, ValueError):
+                            continue
+                        samples.append(
+                            {
+                                "index": sample_index,
+                                "path": str(sample_path),
+                            }
+                        )
+
+                # Candidates — top-3 ближайших known speakers по centroid кластера
+                candidates: list[dict[str, Any]] = []
+                centroid_key = f"{label}_centroid"
+                cluster_centroid = None
+                try:
+                    bundle_emb = self._load_npz(meeting_dir / "embeddings.npz")
+                    cluster_centroid = bundle_emb.get(centroid_key)
+                except Exception as exc:
+                    logger.warning(
+                        "Не удалось прочитать centroid кластера %s/%s: %s",
+                        meeting_id,
+                        label,
+                        exc,
+                    )
+                if cluster_centroid is not None and centroids:
+                    normalized = l2_normalize(
+                        np.asarray(cluster_centroid, dtype=np.float32)
+                    )
+                    scored = [
+                        (name, float(np.dot(normalized, centroid)))
+                        for name, centroid in centroids.items()
+                    ]
+                    scored.sort(key=lambda pair: pair[1], reverse=True)
+                    for name, score in scored[:3]:
+                        candidates.append({"name": name, "score": score})
+
+                items.append(
+                    {
+                        "meeting_id": meeting_id,
+                        "cluster_label": label,
+                        "confidence": confidence,
+                        "samples": samples,
+                        "candidates": candidates,
+                    }
+                )
+        return items
+
     def get_centroid(self, name: str) -> np.ndarray:
         embeddings = self._load_embeddings()
         centroid_key = f"{name}_centroid"

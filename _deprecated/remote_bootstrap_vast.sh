@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+echo "[DEPRECATED] Этот скрипт не работает с VDS 193.233.87.211 + Modal." >&2
+echo "Используй: ./deploy_vds.sh (см. ./deploy_vds.sh --help)" >&2
+exit 1
+
 # bootstrap_vast.sh — развернуть transcribe-stack на НОВОМ Vast-инстансе.
 #
 # Выполняется ЛОКАЛЬНО (на Mac или VDS), нужен доступ к новому vast:

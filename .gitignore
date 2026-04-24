@@ -17,3 +17,5 @@ test_*.py
 !tg-bot/tests/test_*.py
 whisper_transcript.json
 .claude/
+.deploy-logs/
+_deprecated/*.log

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+echo "[DEPRECATED] Этот скрипт не работает с VDS 193.233.87.211 + Modal." >&2
+echo "Используй: ./deploy_vds.sh (см. ./deploy_vds.sh --help)" >&2
+exit 1
+
 # hotfix.sh — мгновенный деплой через rsync (без git)
 # Синкает файлы напрямую + рестартит сервис. Для быстрых итераций.
 #

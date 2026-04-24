@@ -45,6 +45,9 @@ class AnthropicAdvisorSpeakerRefiner:
         self.max_tokens = max_tokens
         self.timeout_seconds = timeout_seconds
         self.max_changes = max_changes
+        # Кумулятивная usage-статистика (input/output токены) — читается пайплайном
+        # для заполнения metrics.claude_input_tokens/output_tokens.
+        self.last_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
     @classmethod
     def from_env(cls):
@@ -67,7 +70,9 @@ class AnthropicAdvisorSpeakerRefiner:
 
     def refine(self, segments: list[Any]) -> list[Any]:
         if not self.api_key:
-            logger.warning("ANTHROPIC_API_KEY is not set; speaker LLM refinement skipped")
+            logger.warning(
+                "ANTHROPIC_API_KEY is not set; speaker LLM refinement skipped"
+            )
             return segments
 
         allowed_speakers = sorted(
@@ -83,6 +88,14 @@ class AnthropicAdvisorSpeakerRefiner:
             logger.warning("Speaker LLM refinement request failed: %s", exc)
             return segments
 
+        # Копим usage-статистику (для metrics.claude_*).
+        usage = response_payload.get("usage") or {}
+        try:
+            self.last_usage["input_tokens"] += int(usage.get("input_tokens") or 0)
+            self.last_usage["output_tokens"] += int(usage.get("output_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+
         text = self._extract_response_text(response_payload)
         try:
             change_payload = self._parse_json_object(text)
@@ -96,7 +109,8 @@ class AnthropicAdvisorSpeakerRefiner:
             allowed_speakers=set(allowed_speakers),
         )
         changed = sum(
-            1 for before, after in zip(segments, refined_segments)
+            1
+            for before, after in zip(segments, refined_segments)
             if before.speaker != after.speaker
         )
         logger.info("Speaker LLM refinement applied %d changes", changed)
@@ -232,7 +246,7 @@ class AnthropicAdvisorSpeakerRefiner:
             end = text.rfind("}")
             if start < 0 or end <= start:
                 raise ValueError("JSON object not found") from None
-            payload = json.loads(text[start:end + 1])
+            payload = json.loads(text[start : end + 1])
         if not isinstance(payload, dict):
             raise ValueError("top-level JSON is not an object")
         return payload
@@ -247,7 +261,7 @@ class AnthropicAdvisorSpeakerRefiner:
             "adjacency, short confirmations, and speaker continuity. "
             "If a hard global consistency decision is needed, consult the advisor. "
             "Return only JSON with this schema: "
-            "{\"changes\":[{\"index\":0,\"speaker\":\"allowed speaker\","
-            "\"confidence\":0.0,\"reason\":\"short reason\"}]}. "
+            '{"changes":[{"index":0,"speaker":"allowed speaker",'
+            '"confidence":0.0,"reason":"short reason"}]}. '
             "Omit unchanged segments."
         )

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+echo "[DEPRECATED] Этот скрипт не работает с VDS 193.233.87.211 + Modal." >&2
+echo "Используй: ./deploy_vds.sh (см. ./deploy_vds.sh --help)" >&2
+exit 1
+
 # Подготовка нового Vast.ai хоста под telemost-transcriber.
 # Запускать НА САМОМ СЕРВЕРЕ:
 #   bash /workspace/telemost-transcriber/bootstrap_vast_host.sh

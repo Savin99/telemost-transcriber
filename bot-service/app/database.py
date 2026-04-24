@@ -47,6 +47,7 @@ class Meeting(Base):
     drive_web_view_link = Column(Text)
     created_at = Column(Text, default=_now_iso)
     updated_at = Column(Text, default=_now_iso, onupdate=_now_iso)
+    admin_meta = Column(Text, nullable=False, server_default="{}", default="{}")
 
 
 class TranscriptSegmentDB(Base):
@@ -145,33 +146,47 @@ async def _migrate_postgres_transcript_segment_id(conn):
         )
 
     await conn.execute(text("ALTER TABLE transcript_segments DROP COLUMN id"))
-    await conn.execute(text("ALTER TABLE transcript_segments RENAME COLUMN id_uuid_tmp TO id"))
-    await conn.execute(text("ALTER TABLE transcript_segments ALTER COLUMN id SET NOT NULL"))
+    await conn.execute(
+        text("ALTER TABLE transcript_segments RENAME COLUMN id_uuid_tmp TO id")
+    )
+    await conn.execute(
+        text("ALTER TABLE transcript_segments ALTER COLUMN id SET NOT NULL")
+    )
     await conn.execute(text("ALTER TABLE transcript_segments ADD PRIMARY KEY (id)"))
 
     logger.info("Migration complete: transcript_segments.id is now UUID")
 
 
-async def _ensure_meeting_upload_columns(conn):
+async def _ensure_meeting_columns(conn):
     def _get_columns(sync_conn):
         return {column["name"] for column in inspect(sync_conn).get_columns("meetings")}
 
     column_names = await conn.run_sync(_get_columns)
-    required_columns = {
-        "transcript_url": "TEXT",
-        "drive_file_id": "TEXT",
-        "drive_folder_id": "TEXT",
-        "drive_filename": "TEXT",
-        "drive_web_view_link": "TEXT",
-    }
+    # (column_name, sql_type, add_clause_suffix) — suffix задаёт DEFAULT/NOT NULL
+    # для ALTER TABLE, если нужно.
+    required_columns = [
+        ("transcript_url", "TEXT", ""),
+        ("drive_file_id", "TEXT", ""),
+        ("drive_folder_id", "TEXT", ""),
+        ("drive_filename", "TEXT", ""),
+        ("drive_web_view_link", "TEXT", ""),
+        # admin_meta добавляется в уже существующие таблицы без NOT NULL (SQLite
+        # запрещает добавлять NOT NULL без NULL-дефолта через ALTER). Сразу после
+        # ALTER делаем UPDATE, чтобы все NULL превратились в '{}'.
+        ("admin_meta", "TEXT", " DEFAULT '{}'"),
+    ]
 
-    for column_name, sql_type in required_columns.items():
+    for column_name, sql_type, suffix in required_columns:
         if column_name in column_names:
             continue
         await conn.execute(
-            text(f"ALTER TABLE meetings ADD COLUMN {column_name} {sql_type}")
+            text(f"ALTER TABLE meetings ADD COLUMN {column_name} {sql_type}{suffix}")
         )
         logger.info("Added meetings.%s column", column_name)
+
+    await conn.execute(
+        text("UPDATE meetings SET admin_meta = '{}' WHERE admin_meta IS NULL")
+    )
 
 
 async def init_db():
@@ -179,7 +194,7 @@ async def init_db():
     async with engine.begin() as conn:
         await _migrate_postgres_transcript_segment_id(conn)
         await conn.run_sync(Base.metadata.create_all)
-        await _ensure_meeting_upload_columns(conn)
+        await _ensure_meeting_columns(conn)
 
 
 async def get_session():

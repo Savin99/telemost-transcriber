@@ -324,5 +324,194 @@ class VoiceBankTests(unittest.TestCase):
             )
 
 
+class VoiceBankAdminMethodsTests(unittest.TestCase):
+    """Unit-тесты методов rename/merge/similarity_matrix/list_review_queue."""
+
+    def _enroll(self, voice_bank: VoiceBank, name: str, embedding: list[float]):
+        audio_path = Path(voice_bank.root_dir) / f"{name}.wav"
+        _write_test_wav(audio_path)
+        voice_bank._speaker_identifier = QueueIdentifier([embedding])
+        voice_bank.enroll(name, [str(audio_path)])
+
+    def test_rename_moves_metadata_and_embeddings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+
+            self.assertTrue(voice_bank.rename("Alice", "Алиса"))
+            names = {speaker["name"] for speaker in voice_bank.list_speakers()}
+            self.assertEqual(names, {"Алиса"})
+            # Центроид перенесён
+            centroid = voice_bank.get_centroid("Алиса")
+            self.assertAlmostEqual(float(np.linalg.norm(centroid)), 1.0, places=5)
+
+    def test_rename_missing_returns_false(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self.assertFalse(voice_bank.rename("ghost", "anyone"))
+
+    def test_rename_conflict_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            self._enroll(voice_bank, "Bob", [0.0, 1.0, 0.0])
+            with self.assertRaises(ValueError):
+                voice_bank.rename("Alice", "Bob")
+
+    def test_merge_combines_embeddings_and_removes_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            self._enroll(voice_bank, "AliceDup", [0.9, 0.1, 0.0])
+
+            new_n = voice_bank.merge("AliceDup", "Alice")
+            self.assertEqual(new_n, 2)
+
+            names = {speaker["name"] for speaker in voice_bank.list_speakers()}
+            self.assertEqual(names, {"Alice"})
+            meta = voice_bank.list_speakers()[0]
+            self.assertEqual(meta["num_embeddings"], 2)
+
+            # Centroid — среднее нормализованных векторов
+            expected = l2_normalize(
+                (
+                    l2_normalize(np.array([1.0, 0.0, 0.0], dtype=np.float32))
+                    + l2_normalize(np.array([0.9, 0.1, 0.0], dtype=np.float32))
+                )
+                / 2.0
+            )
+            np.testing.assert_allclose(
+                voice_bank.get_centroid("Alice"), expected, atol=1e-6
+            )
+
+    def test_merge_aggregates_n_samples_when_present(self):
+        """Если у index есть n_samples/sample_segments — они суммируются/склеиваются."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            self._enroll(voice_bank, "AliceDup", [0.9, 0.1, 0.0])
+
+            # Эмулируем старый формат index с sample_segments/n_samples
+            index = voice_bank._load_index()
+            index["Alice"]["n_samples"] = 3
+            index["Alice"]["sample_segments"] = [{"start": 0.0, "end": 1.0}]
+            index["AliceDup"]["n_samples"] = 5
+            index["AliceDup"]["sample_segments"] = [{"start": 2.0, "end": 3.0}]
+            voice_bank._persist(index, voice_bank._load_embeddings())
+
+            new_n = voice_bank.merge("AliceDup", "Alice")
+            self.assertEqual(new_n, 8)  # 3+5
+
+            meta = voice_bank.list_speakers()[0]
+            self.assertEqual(meta["n_samples"], 8)
+            self.assertEqual(
+                meta["sample_segments"],
+                [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 3.0}],
+            )
+
+    def test_merge_missing_source_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            with self.assertRaises(KeyError):
+                voice_bank.merge("ghost", "Alice")
+
+    def test_merge_same_name_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            with self.assertRaises(ValueError):
+                voice_bank.merge("Alice", "Alice")
+
+    def test_similarity_matrix_shape_and_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+            self._enroll(voice_bank, "Bob", [0.0, 1.0, 0.0])
+            self._enroll(voice_bank, "Charlie", [1.0, 1.0, 0.0])
+
+            matrix = voice_bank.similarity_matrix()
+            self.assertEqual(set(matrix.keys()), {"Alice", "Bob", "Charlie"})
+            # Диагональ — 1.0
+            for name in matrix:
+                self.assertAlmostEqual(matrix[name][name], 1.0, places=5)
+            # Симметричность
+            self.assertAlmostEqual(
+                matrix["Alice"]["Bob"], matrix["Bob"]["Alice"], places=6
+            )
+            # Alice ⊥ Bob => 0; Alice · Charlie(norm) == cos(45°) ≈ 0.7071
+            self.assertAlmostEqual(matrix["Alice"]["Bob"], 0.0, places=5)
+            self.assertAlmostEqual(
+                matrix["Alice"]["Charlie"], 1.0 / np.sqrt(2.0), places=5
+            )
+
+    def test_similarity_matrix_empty_when_no_speakers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self.assertEqual(voice_bank.similarity_matrix(), {})
+
+    def test_list_review_queue_empty_without_meetings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            self.assertEqual(voice_bank.list_review_queue(), [])
+
+    def test_list_review_queue_collects_unknown_clusters(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            voice_bank = VoiceBank(temp_dir)
+            # Уже есть известный спикер — кандидат для unknown-кластера
+            self._enroll(voice_bank, "Alice", [1.0, 0.0, 0.0])
+
+            meeting_path = Path(temp_dir) / "meeting.wav"
+            _write_test_wav(meeting_path, duration_seconds=2.0)
+
+            cluster_profiles = {
+                "SPEAKER_00": {
+                    "segments": [{"start": 0.0, "end": 1.2}],
+                    "embedding_segments": [{"start": 0.0, "end": 1.2}],
+                    "segment_embeddings": [
+                        l2_normalize(np.array([1.0, 0.0, 0.0], dtype=np.float32)),
+                    ],
+                    "centroid": l2_normalize(
+                        np.array([0.95, 0.05, 0.0], dtype=np.float32)
+                    ),
+                },
+                "SPEAKER_01": {
+                    "segments": [{"start": 1.3, "end": 2.0}],
+                    "embedding_segments": [{"start": 1.3, "end": 2.0}],
+                    "segment_embeddings": [
+                        l2_normalize(np.array([0.0, 1.0, 0.0], dtype=np.float32)),
+                    ],
+                    "centroid": l2_normalize(
+                        np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                    ),
+                },
+            }
+            mapping = {
+                "SPEAKER_00": IdentificationResult(
+                    name="Unknown Speaker 1", confidence=0.1, is_known=False
+                ),
+                # SPEAKER_01 — уже known => должен отфильтроваться
+                "SPEAKER_01": IdentificationResult(
+                    name="Alice", confidence=0.95, is_known=True
+                ),
+            }
+            voice_bank.save_meeting_bundle(
+                audio_path=str(meeting_path),
+                cluster_profiles=cluster_profiles,
+                mapping=mapping,
+                threshold=0.40,
+                ordered_labels=["SPEAKER_00", "SPEAKER_01"],
+            )
+
+            items = voice_bank.list_review_queue()
+            self.assertEqual(len(items), 1)
+            item = items[0]
+            self.assertEqual(item["cluster_label"], "SPEAKER_00")
+            self.assertAlmostEqual(item["confidence"], 0.1, places=5)
+            # candidates — top-3 по centroid, Alice должна быть первой
+            self.assertTrue(item["candidates"])
+            self.assertEqual(item["candidates"][0]["name"], "Alice")
+
+
 if __name__ == "__main__":
     unittest.main()

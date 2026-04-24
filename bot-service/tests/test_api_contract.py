@@ -165,6 +165,8 @@ class BotServiceContractTests(unittest.TestCase):
                 "RECORDINGS_DIR": str(recordings_dir),
                 "TRANSCRIBER_URL": "http://transcriber.test",
                 "TELEMOST_SERVICE_API_KEY": "supersecret",
+                "ADMIN_USERNAME": "testadmin",
+                "ADMIN_PASSWORD": "testpass",
             },
             clear=False,
         )
@@ -204,6 +206,16 @@ class BotServiceContractTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 with TestClient(module.app):
                     pass
+        self.main = self._reload_main()
+
+    def test_service_refuses_to_start_without_admin_credentials(self):
+        for empty in ({"ADMIN_USERNAME": ""}, {"ADMIN_PASSWORD": ""}):
+            with patch.dict(os.environ, empty, clear=False):
+                module = self._reload_main()
+                with self.assertRaises(RuntimeError) as ctx:
+                    with TestClient(module.app):
+                        pass
+                self.assertIn("ADMIN_", str(ctx.exception))
         self.main = self._reload_main()
 
     def test_all_public_endpoints_require_api_key(self):
