@@ -1,6 +1,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -302,6 +303,150 @@ async def speaker_review_label(
     except Exception as e:
         logger.exception("Speaker label update failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class VoiceBankSpeaker(BaseModel):
+    """Один спикер из voice-bank с агрегатами для admin-панели."""
+
+    name: str
+    n_samples: int
+    is_known: bool = True
+    confidence: float | None = None
+    last_seen: str | None = None
+    enrolled_at: str | None = None
+    updated_at: str | None = None
+
+
+class VoiceBankRenameRequest(BaseModel):
+    new_name: str
+
+
+class VoiceBankMergeRequest(BaseModel):
+    source: str
+    target: str
+
+
+class ReviewQueueCandidate(BaseModel):
+    name: str
+    score: float
+
+
+class ReviewQueueSample(BaseModel):
+    index: int
+    path: str
+
+
+class ReviewQueueItem(BaseModel):
+    meeting_id: str
+    cluster_label: str
+    confidence: float
+    samples: list[ReviewQueueSample]
+    candidates: list[ReviewQueueCandidate]
+
+
+def _require_voice_bank():
+    if pipeline is None or getattr(pipeline, "voice_bank", None) is None:
+        raise HTTPException(status_code=503, detail="Voice bank not ready")
+    return pipeline.voice_bank
+
+
+@app.get("/voice-bank/speakers", response_model=list[VoiceBankSpeaker])
+async def voice_bank_speakers() -> list[VoiceBankSpeaker]:
+    """Список всех спикеров с агрегатами из index.json."""
+    voice_bank = _require_voice_bank()
+    result: list[VoiceBankSpeaker] = []
+    for speaker in voice_bank.list_speakers():
+        name = speaker.get("name", "")
+        n_samples = int(speaker.get("n_samples", speaker.get("num_embeddings", 0)) or 0)
+        result.append(
+            VoiceBankSpeaker(
+                name=name,
+                n_samples=n_samples,
+                is_known=True,
+                confidence=speaker.get("confidence"),
+                last_seen=speaker.get("last_seen") or speaker.get("updated_at"),
+                enrolled_at=speaker.get("enrolled_at"),
+                updated_at=speaker.get("updated_at"),
+            )
+        )
+    return result
+
+
+@app.delete("/voice-bank/{name}")
+async def voice_bank_delete(name: str) -> dict[str, str]:
+    """Полностью удалить спикера (index + embeddings.npz)."""
+    voice_bank = _require_voice_bank()
+    speakers = {s["name"] for s in voice_bank.list_speakers()}
+    if name not in speakers:
+        raise HTTPException(status_code=404, detail=f"Speaker not found: {name}")
+    voice_bank.remove(name)
+    return {"status": "ok", "name": name}
+
+
+@app.post("/voice-bank/{name}/rename")
+async def voice_bank_rename(
+    name: str, request: VoiceBankRenameRequest
+) -> dict[str, str]:
+    """Переименовать спикера. 409 если new_name занят, 404 если name не найден."""
+    voice_bank = _require_voice_bank()
+    try:
+        ok = voice_bank.rename(name, request.new_name)
+    except ValueError as exc:
+        message = str(exc)
+        if "существует" in message:
+            raise HTTPException(status_code=409, detail=message)
+        raise HTTPException(status_code=400, detail=message)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Speaker not found: {name}")
+    return {"status": "ok", "name": request.new_name}
+
+
+@app.post("/voice-bank/merge")
+async def voice_bank_merge(request: VoiceBankMergeRequest) -> dict[str, Any]:
+    """Объединить source → target. Возвращает итоговый n_samples у target."""
+    voice_bank = _require_voice_bank()
+    try:
+        n_samples = voice_bank.merge(request.source, request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {
+        "status": "ok",
+        "source": request.source,
+        "target": request.target,
+        "n_samples": n_samples,
+    }
+
+
+@app.get("/voice-bank/similarity-matrix")
+async def voice_bank_similarity_matrix() -> dict[str, dict[str, float]]:
+    """Попарная cosine-similarity между centroid'ами всех known speakers."""
+    voice_bank = _require_voice_bank()
+    return voice_bank.similarity_matrix()
+
+
+@app.get("/review-queue", response_model=list[ReviewQueueItem])
+async def review_queue() -> list[ReviewQueueItem]:
+    """Агрегированная очередь review-кластеров из meetings/*/bundle.json."""
+    voice_bank = _require_voice_bank()
+    items = voice_bank.list_review_queue()
+    return [
+        ReviewQueueItem(
+            meeting_id=item["meeting_id"],
+            cluster_label=item["cluster_label"],
+            confidence=float(item.get("confidence") or 0.0),
+            samples=[
+                ReviewQueueSample(index=int(s["index"]), path=str(s["path"]))
+                for s in item.get("samples", [])
+            ],
+            candidates=[
+                ReviewQueueCandidate(name=str(c["name"]), score=float(c["score"]))
+                for c in item.get("candidates", [])
+            ],
+        )
+        for item in items
+    ]
 
 
 @app.get("/health")
