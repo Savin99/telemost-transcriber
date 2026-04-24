@@ -289,6 +289,174 @@ class AdminMeetingsTests(unittest.TestCase):
         self.assertIn("audio/wav", response.headers["content-type"])
         self.assertEqual(response.content, audio_path.read_bytes())
 
+    # ----------------------------- retry --------------------------------
+
+    def _stub_bot_workflow(self):
+        """Заменяет main._bot_workflow корутиной-заглушкой и возвращает
+        список, куда запишутся все вызовы (meeting_id, url, bot, num)."""
+        calls: list[tuple] = []
+
+        async def _stub(meeting_id, meeting_url, bot_name, num_speakers=None):
+            calls.append((meeting_id, meeting_url, bot_name, num_speakers))
+            # Имитируем мгновенный успех: убираем себя из active_sessions.
+            self.main.active_sessions.pop(meeting_id, None)
+
+        self.main._bot_workflow = _stub
+        return calls
+
+    def test_retry_starts_workflow(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            calls = self._stub_bot_workflow()
+            response = client.post("/admin/api/meetings/m1/retry", auth=self.auth)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["id"], "m1")
+        # Статус сбросился в pending (до того, как stub удалил сессию).
+        self.assertEqual(body["status"], "pending")
+        # Workflow был запущен ровно один раз с корректными параметрами.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "m1")
+        self.assertEqual(calls[0][1], "https://telemost.yandex.ru/j/1")
+        self.assertIsNone(calls[0][3])
+
+    def test_retry_conflict_if_active(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            calls = self._stub_bot_workflow()
+            # Искусственно «занимаем» сессию до запроса retry.
+            self.main.active_sessions["m1"] = {
+                "task": None,
+                "session": None,
+                "capture": None,
+                "stop_requested": False,
+                "stop_before_recording": False,
+                "recording_started": False,
+            }
+            response = client.post("/admin/api/meetings/m1/retry", auth=self.auth)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(calls, [])  # workflow не запускался
+
+    def test_retry_conflict_if_status_not_final(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            calls = self._stub_bot_workflow()
+            # m2 имеет status="pending" — не финальный.
+            response = client.post("/admin/api/meetings/m2/retry", auth=self.auth)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(calls, [])
+
+    def test_retry_not_found(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            self._stub_bot_workflow()
+            response = client.post(
+                "/admin/api/meetings/does-not-exist/retry", auth=self.auth
+            )
+        self.assertEqual(response.status_code, 404)
+
+    # ------------------------------ bulk --------------------------------
+
+    def test_bulk_delete_marks_all(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={"ids": ["m1", "m2"], "action": "delete"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(sorted(body["updated"]), ["m1", "m2"])
+        self.assertEqual(body["not_found"], [])
+        # Оба отфильтрованы из обычного листинга.
+        with TestClient(self.main.app) as client:
+            lst = client.get("/admin/api/meetings", auth=self.auth).json()
+        ids = [i["id"] for i in lst["items"]]
+        self.assertNotIn("m1", ids)
+        self.assertNotIn("m2", ids)
+
+    def test_bulk_tag_add_appends(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={
+                    "ids": ["m1", "m2"],
+                    "action": "tag_add",
+                    "payload": {"tag": "review"},
+                },
+                auth=self.auth,
+            )
+            self.assertEqual(response.status_code, 200)
+            # Повторный вызов не должен дублировать тег.
+            client.post(
+                "/admin/api/meetings/bulk",
+                json={
+                    "ids": ["m1"],
+                    "action": "tag_add",
+                    "payload": {"tag": "review"},
+                },
+                auth=self.auth,
+            )
+            m1 = client.get("/admin/api/meetings/m1", auth=self.auth).json()
+            m2 = client.get("/admin/api/meetings/m2", auth=self.auth).json()
+        # m1 имел ["harness", "daily"] — добавился review, без дублей.
+        self.assertIn("review", m1["tags"])
+        self.assertEqual(m1["tags"].count("review"), 1)
+        self.assertIn("harness", m1["tags"])
+        self.assertEqual(m2["tags"], ["review"])
+
+    def test_bulk_tag_remove(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={
+                    "ids": ["m1"],
+                    "action": "tag_remove",
+                    "payload": {"tag": "harness"},
+                },
+                auth=self.auth,
+            )
+            self.assertEqual(response.status_code, 200)
+            m1 = client.get("/admin/api/meetings/m1", auth=self.auth).json()
+        self.assertNotIn("harness", m1["tags"])
+        self.assertIn("daily", m1["tags"])
+
+    def test_bulk_invalid_action(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={"ids": ["m1"], "action": "explode"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 422)
+
+    def test_bulk_tag_add_requires_tag_payload(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={"ids": ["m1"], "action": "tag_add"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 422)
+
+    def test_bulk_partial_not_found(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.post(
+                "/admin/api/meetings/bulk",
+                json={"ids": ["m1", "ghost"], "action": "delete"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["updated"], ["m1"])
+        self.assertEqual(body["not_found"], ["ghost"])
+
 
 if __name__ == "__main__":
     unittest.main()

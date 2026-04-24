@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..database import Meeting, TranscriptSegmentDB, get_session
 from .schemas import (
     AiStatus,
+    BulkAction,
+    BulkResult,
     DriveInfo,
     MeetingDetail,
     MeetingListItem,
@@ -357,6 +360,130 @@ async def patch_segment(
         end=float(segment.end_time),
         text=segment.text,
     )
+
+
+# Статусы, из которых допустим retry — встреча должна быть в финальном состоянии.
+_RETRY_ALLOWED_STATUSES: frozenset[str] = frozenset({"done", "error"})
+
+
+@meetings_router.post("/bulk", response_model=BulkResult)
+async def bulk_meetings(
+    payload: BulkAction,
+    session: AsyncSession = Depends(get_session),
+) -> BulkResult:
+    """Батчевая операция: delete/restore/tag_add/tag_remove по списку id.
+
+    retry в bulk НЕ делаем — слишком опасно массово бить workflow.
+    """
+    # Валидация payload для tag_* — тег должен быть непустой строкой.
+    tag_value: str | None = None
+    if payload.action in {"tag_add", "tag_remove"}:
+        raw_tag = (payload.payload or {}).get("tag")
+        if not isinstance(raw_tag, str) or not raw_tag.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="payload.tag (non-empty string) is required for tag_add/tag_remove",
+            )
+        tag_value = raw_tag.strip()
+
+    # Загружаем все встречи разом, сохраняя исходный порядок id для not_found.
+    rows = (
+        (await session.execute(select(Meeting).where(Meeting.id.in_(payload.ids))))
+        .scalars()
+        .all()
+    )
+    by_id: dict[str, Meeting] = {m.id: m for m in rows}
+
+    updated: list[str] = []
+    not_found: list[str] = []
+    now = _now_iso()
+
+    for meeting_id in payload.ids:
+        meeting = by_id.get(meeting_id)
+        if meeting is None:
+            not_found.append(meeting_id)
+            continue
+
+        meta = _parse_admin_meta(meeting.admin_meta)
+        if payload.action == "delete":
+            meta["deleted_at"] = now
+        elif payload.action == "restore":
+            meta.pop("deleted_at", None)
+        elif payload.action == "tag_add":
+            assert tag_value is not None
+            tags = list(meta.get("tags") or [])
+            if tag_value not in tags:
+                tags.append(tag_value)
+            meta["tags"] = tags
+        elif payload.action == "tag_remove":
+            assert tag_value is not None
+            tags = [t for t in (meta.get("tags") or []) if t != tag_value]
+            meta["tags"] = tags
+
+        meeting.admin_meta = json.dumps(meta, ensure_ascii=False)
+        meeting.updated_at = now
+        updated.append(meeting_id)
+
+    await session.commit()
+    return BulkResult(updated=updated, not_found=not_found)
+
+
+@meetings_router.post("/{meeting_id}/retry", response_model=MeetingDetail)
+async def retry_meeting(
+    meeting_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> MeetingDetail:
+    """Перезапустить обработку встречи.
+
+    Требования:
+      * встреча существует (иначе 404);
+      * нет активной сессии (meeting_id in active_sessions → 409);
+      * статус в {done, error} (иначе 409 — не дёргаем незавершённые).
+
+    _bot_workflow и active_sessions импортируются лениво, чтобы избежать
+    циклического импорта (main.py импортирует admin_router).
+    """
+    # Локальный импорт обязателен: main.py импортирует admin_router на верхнем
+    # уровне, поэтому импорт на уровне модуля создал бы цикл.
+    from ..main import _bot_workflow, active_sessions
+
+    meeting = await _get_or_404(session, meeting_id)
+
+    if meeting_id in active_sessions:
+        raise HTTPException(
+            status_code=409,
+            detail="Meeting has an active session; retry is not allowed",
+        )
+    if meeting.status not in _RETRY_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Meeting status {meeting.status!r} is not final; "
+                f"retry allowed only from {sorted(_RETRY_ALLOWED_STATUSES)}"
+            ),
+        )
+
+    # Сбрасываем статус и ошибку, коммитим — чтобы фоновый workflow увидел pending.
+    meeting.status = "pending"
+    meeting.error_message = None
+    meeting.updated_at = _now_iso()
+    await session.commit()
+
+    # Регистрируем сессию и запускаем workflow в фоне — повторяем паттерн /join.
+    active_sessions[meeting_id] = {
+        "task": None,
+        "session": None,
+        "capture": None,
+        "stop_requested": False,
+        "stop_before_recording": False,
+        "recording_started": False,
+    }
+    task = asyncio.create_task(
+        _bot_workflow(meeting_id, meeting.meeting_url, meeting.bot_name, None)
+    )
+    active_sessions[meeting_id]["task"] = task
+
+    return await get_meeting(meeting_id, session)
 
 
 @meetings_router.get("/{meeting_id}/audio")
