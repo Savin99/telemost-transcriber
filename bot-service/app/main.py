@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import logging
 import os
 import secrets
@@ -103,6 +104,16 @@ def _load_admin_credentials() -> tuple[str, str]:
     if not username or not password:
         raise RuntimeError("ADMIN_USERNAME and ADMIN_PASSWORD must be set")
     return username, password
+
+
+def _parse_admin_meta_safe(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except (TypeError, ValueError):
+        return {}
 
 
 async def require_api_key(
@@ -424,6 +435,18 @@ async def _bot_workflow(
             meeting.drive_folder_id = drive_file["folder_id"]
             meeting.drive_filename = drive_file["filename"]
             meeting.drive_web_view_link = drive_file["web_view_link"]
+            # admin_meta: сохраняем ai_status/metrics сразу — UI админ-панели читает
+            # их из этого JSON. Всё остальное (title/tags/summary) редактируется
+            # через PATCH /admin/api/meetings/{id}.
+            existing_meta = _parse_admin_meta_safe(meeting.admin_meta)
+            existing_meta.update(
+                {
+                    "ai_status": ai_status or existing_meta.get("ai_status"),
+                    "metrics": transcribe_result.get("metrics")
+                    or existing_meta.get("metrics", {}),
+                }
+            )
+            meeting.admin_meta = json.dumps(existing_meta, ensure_ascii=False)
             await session.commit()
             logger.info("Meeting %s processed successfully", meeting_id)
 
