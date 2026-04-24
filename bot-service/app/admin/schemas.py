@@ -82,3 +82,20 @@ class MeetingDetail(MeetingListItem):
     segments: list[TranscriptSegmentOut] = Field(default_factory=list)
     meeting_url: str | None = None
     recording_path: str | None = None
+
+
+class SegmentUpdate(BaseModel):
+    """PATCH /admin/api/meetings/{id}/segments/{index}."""
+
+    speaker: str | None = None
+    text: str | None = None
+
+
+class MeetingUpdate(BaseModel):
+    """PATCH /admin/api/meetings/{id}. Пишет только в admin_meta."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    tags: list[str] | None = None
+    summary: dict[str, Any] | None = None

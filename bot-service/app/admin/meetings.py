@@ -1,4 +1,4 @@
-"""Read-only endpoints /admin/api/meetings[/{id}]."""
+"""Endpoints /admin/api/meetings[/{id}] — read + mutations + audio."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import json
 import logging
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +21,8 @@ from .schemas import (
     MeetingDetail,
     MeetingListItem,
     MeetingListResponse,
+    MeetingUpdate,
+    SegmentUpdate,
     SpeakerAggregate,
     TranscriptSegmentOut,
 )
@@ -246,3 +250,127 @@ async def get_meeting(
     fields["meeting_url"] = meeting.meeting_url
     fields["recording_path"] = meeting.recording_path
     return MeetingDetail(**fields)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _get_or_404(session: AsyncSession, meeting_id: str) -> Meeting:
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return meeting
+
+
+@meetings_router.patch("/{meeting_id}", response_model=MeetingDetail)
+async def patch_meeting(
+    meeting_id: str,
+    payload: MeetingUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> MeetingDetail:
+    """Обновить title/tags/summary в admin_meta."""
+    meeting = await _get_or_404(session, meeting_id)
+    meta = _parse_admin_meta(meeting.admin_meta)
+    updates = payload.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    meeting.admin_meta = json.dumps(meta, ensure_ascii=False)
+    meeting.updated_at = _now_iso()
+    await session.commit()
+    await session.refresh(meeting)
+    return await get_meeting(meeting_id, session)
+
+
+@meetings_router.delete("/{meeting_id}", status_code=204)
+async def soft_delete_meeting(
+    meeting_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Soft-delete: admin_meta.deleted_at = now. Сам row и запись остаются."""
+    meeting = await _get_or_404(session, meeting_id)
+    meta = _parse_admin_meta(meeting.admin_meta)
+    meta["deleted_at"] = _now_iso()
+    meeting.admin_meta = json.dumps(meta, ensure_ascii=False)
+    meeting.updated_at = _now_iso()
+    await session.commit()
+
+
+@meetings_router.post("/{meeting_id}/restore", response_model=MeetingDetail)
+async def restore_meeting(
+    meeting_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> MeetingDetail:
+    """Отмена soft-delete."""
+    meeting = await _get_or_404(session, meeting_id)
+    meta = _parse_admin_meta(meeting.admin_meta)
+    meta.pop("deleted_at", None)
+    meeting.admin_meta = json.dumps(meta, ensure_ascii=False)
+    meeting.updated_at = _now_iso()
+    await session.commit()
+    return await get_meeting(meeting_id, session)
+
+
+@meetings_router.patch(
+    "/{meeting_id}/segments/{index}",
+    response_model=TranscriptSegmentOut,
+)
+async def patch_segment(
+    meeting_id: str,
+    index: int,
+    payload: SegmentUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> TranscriptSegmentOut:
+    """Обновить speaker/text у сегмента. index = позиция по start_time asc."""
+    await _get_or_404(session, meeting_id)
+    seg_rows = (
+        (
+            await session.execute(
+                select(TranscriptSegmentDB)
+                .where(TranscriptSegmentDB.meeting_id == meeting_id)
+                .order_by(TranscriptSegmentDB.start_time)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if index < 0 or index >= len(seg_rows):
+        raise HTTPException(status_code=404, detail="Segment not found")
+
+    segment = seg_rows[index]
+    updates = payload.model_dump(exclude_unset=True)
+    if "speaker" in updates:
+        segment.speaker = updates["speaker"]
+    if "text" in updates:
+        if not updates["text"] or not updates["text"].strip():
+            raise HTTPException(status_code=422, detail="text cannot be empty")
+        segment.text = updates["text"]
+    await session.commit()
+    await session.refresh(segment)
+    return TranscriptSegmentOut(
+        index=index,
+        speaker=segment.speaker,
+        start=float(segment.start_time),
+        end=float(segment.end_time),
+        text=segment.text,
+    )
+
+
+@meetings_router.get("/{meeting_id}/audio")
+async def get_meeting_audio(
+    meeting_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """Стримит recording_path с поддержкой Range (Starlette встроенно)."""
+    meeting = await _get_or_404(session, meeting_id)
+    if not meeting.recording_path or not os.path.isfile(meeting.recording_path):
+        raise HTTPException(status_code=404, detail="Recording not available")
+    filename = os.path.basename(meeting.recording_path)
+    return FileResponse(
+        meeting.recording_path,
+        media_type="audio/wav",
+        filename=filename,
+    )

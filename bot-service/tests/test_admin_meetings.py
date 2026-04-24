@@ -184,6 +184,111 @@ class AdminMeetingsTests(unittest.TestCase):
             response = client.get("/admin/api/meetings/nope", auth=self.auth)
         self.assertEqual(response.status_code, 404)
 
+    def test_patch_meeting_updates_admin_meta(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.patch(
+                "/admin/api/meetings/m2",
+                json={"title": "New title", "tags": ["custom"]},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["title"], "New title")
+        self.assertEqual(body["tags"], ["custom"])
+
+    def test_patch_meeting_extra_fields_rejected(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.patch(
+                "/admin/api/meetings/m2",
+                json={"title": "X", "status": "done"},  # status — не разрешён
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 422)
+
+    def test_soft_delete_then_restore(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            delete = client.delete("/admin/api/meetings/m1", auth=self.auth)
+            self.assertEqual(delete.status_code, 204)
+            # Отфильтрована из листинга
+            lst = client.get("/admin/api/meetings", auth=self.auth).json()
+            self.assertNotIn("m1", [i["id"] for i in lst["items"]])
+            # Восстановление
+            restored = client.post("/admin/api/meetings/m1/restore", auth=self.auth)
+            self.assertEqual(restored.status_code, 200)
+            lst2 = client.get("/admin/api/meetings", auth=self.auth).json()
+            self.assertIn("m1", [i["id"] for i in lst2["items"]])
+
+    def test_patch_segment_updates_text_and_speaker(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.patch(
+                "/admin/api/meetings/m1/segments/0",
+                json={"speaker": "Азиз", "text": "обновлённый"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["speaker"], "Азиз")
+        self.assertEqual(body["text"], "обновлённый")
+        self.assertEqual(body["index"], 0)
+
+    def test_patch_segment_empty_text_rejected(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.patch(
+                "/admin/api/meetings/m1/segments/0",
+                json={"text": "   "},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 422)
+
+    def test_patch_segment_out_of_range(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.patch(
+                "/admin/api/meetings/m1/segments/99",
+                json={"text": "x"},
+                auth=self.auth,
+            )
+        self.assertEqual(response.status_code, 404)
+
+    def test_get_audio_404_when_no_file(self):
+        with TestClient(self.main.app) as client:
+            self._run(self._seed())
+            response = client.get("/admin/api/meetings/m1/audio", auth=self.auth)
+        # recording_path "/tmp/rec/m1.wav" не существует
+        self.assertEqual(response.status_code, 404)
+
+    def test_get_audio_streams_file(self):
+        audio_path = Path(self.tempdir.name) / "audio.wav"
+        audio_path.write_bytes(b"RIFF....WAVEfmt fake-audio-bytes")
+
+        async def _patch():
+            from app.database import async_session, Meeting, init_db
+
+            await init_db()
+            async with async_session() as session:
+                m = Meeting(
+                    id="m-audio",
+                    meeting_url="https://x",
+                    bot_name="Bot",
+                    status="done",
+                    recording_path=str(audio_path),
+                    admin_meta="{}",
+                )
+                session.add(m)
+                await session.commit()
+
+        with TestClient(self.main.app) as client:
+            self._run(_patch())
+            response = client.get("/admin/api/meetings/m-audio/audio", auth=self.auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("audio/wav", response.headers["content-type"])
+        self.assertEqual(response.content, audio_path.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
